@@ -344,6 +344,57 @@ class Utils:
                                           inactive_option[ep_i,:,option_i], 0, self.contract_size))              
         return np.array(options)
 
+        # =========================================================================
+        #                           LMMSABR FUNCTIONS
+        # =========================================================================
+
+
+    def convert_tensor_to_option_objects(option_tensor_list, contract_size=100):
+        """
+        Convert precomputed tensor-style option data into a nested list of Option objects.
+
+        Parameters
+        ----------
+        option_tensor_list : list
+            Outer list is n_episodes long.
+            Each element is a list of option metrics: [price, delta, gamma, vega, inactive]
+            Each metric is a (n_steps, n_options) matrix.
+
+        contract_size : int
+            Number of units per contract.
+
+        Returns
+        -------
+        List[List[Option]]
+            Shape: (n_episodes, n_options), each item is an Option object
+        """
+        n_episodes = len(option_tensor_list)
+        options_per_episode = []
+
+        for ep in range(n_episodes):
+            price_mat, delta_mat, gamma_mat, vega_mat, inactive_mat = option_tensor_list[ep]
+            n_steps, n_opts = price_mat.shape
+
+            episode_options = []
+            for opt_idx in range(n_opts):
+                option = Option(
+                    price_path=price_mat[:, opt_idx],
+                    delta_path=delta_mat[:, opt_idx],
+                    gamma_path=gamma_mat[:, opt_idx],
+                    vega_path=vega_mat[:, opt_idx],
+                    inactive=inactive_mat[:, opt_idx],
+                    num_contract=0,  # this will be managed by the RL policy
+                    contract_size=contract_size,
+                )
+                episode_options.append(option)
+
+            options_per_episode.append(episode_options)
+
+        return options_per_episode
+
+
+
+
     def agg_poisson_dist(self, a_prices, vol):
         """Generate Poisson arrival options' prices & risk profiles
         
