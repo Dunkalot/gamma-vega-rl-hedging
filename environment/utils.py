@@ -20,6 +20,7 @@ from environment.Trading import Option, SyntheticOption
 from absl import flags
 FLAGS = flags.FLAGS
 import numpy as np
+from ..test.
 random.seed(1)
 
 
@@ -247,7 +248,7 @@ class Utils:
         self.implied_vol = implied_vol
         return a_price, implied_vol
 
-    def init_env(self):
+    def init_env(self, lmm=None):
         """Initialize environment
         Entrypoint to simulate market dynamics: 
         1). stock prices 
@@ -260,6 +261,8 @@ class Utils:
             np.ndarray: underlying asset price in shape (num_path, num_period)
             np.ndarray: implied volatility in shape (num_path, num_period)
         """
+        if lmm:
+            return lmm
         if self.sabr:
             return self.get_sim_path_sabr()
         elif self.gbm:

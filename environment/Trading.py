@@ -83,6 +83,58 @@ class Stock(AssetInterface):
     def get_vega(self, t):
         """stock vega at time t"""
         return 0
+    
+
+class Swaps(AssetInterface):
+    """Swap
+    Swap delta is 1, other greeks are 0.
+    Price path is in shape (num_episode, num_step, num_swap).
+    Active path stores the current episode swap trajectories, 
+    and it is reset in MainPortfolio at the beginning of a new episode
+
+    """
+    def __init__(self, price_path) -> None:
+        """Constructor
+
+        Args:
+            price_path (np.ndarray): simulated swap prices in shape (num_episode, num_step)
+        """
+        super().__init__()
+        self.price_path = price_path
+        self.active_path = []
+        self.position = np.zeros(self.active_path.shape[2])
+
+    def set_path(self, sim_episode):
+        self.active_path = self.price_path[sim_episode, :, :]
+        self.position = 0
+
+    def step(self, t):
+        """Step on time t and generate swap P&Ls
+
+        Args:
+            t (int): step time t
+
+        Returns:
+            float: swap P&Ls from time t to t+1
+        """
+        return (self.active_path[t + 1] - self.active_path[t]) * self.position
+
+    def get_value(self, t):
+        """swap value at time t"""
+        return self.position * self.active_path[t]
+    
+    def get_delta(self, t):
+        """swap delta at time t"""
+        return self.position * 1
+
+    def get_gamma(self, t):
+        """swap gamma at time t"""
+        return 0
+
+    def get_vega(self, t):
+        """swap vega at time t"""
+        return 0
+
 
 class Option(AssetInterface):
     """Option storing its position information, price and risk profiles within its simulation path
@@ -380,7 +432,8 @@ class MainPortfolio(AssetInterface):
 
         self.liab_port = LiabilityPortfolio(utils.agg_poisson_dist, self.a_price, self.vol)
         self.hed_port = Portfolio(utils, utils.atm_hedges, self.a_price, self.vol)
-        self.underlying = Stock(self.a_price)
+        #self.underlying = Stock(self.a_price)
+        self.underlying = Swaps(self.a_price)  # WE USING SWAPS INSTEAD
         self.sim_episode = -1
     
     def get_value(self, t):
