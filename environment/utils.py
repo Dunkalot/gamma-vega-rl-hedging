@@ -349,7 +349,7 @@ class Utils:
         # =========================================================================
 
 
-    def convert_tensor_to_option_objects(option_tensor_list, contract_size=100):
+    def convert_tensor_to_option_objects(self, option_tensor_list):
         """
         Convert precomputed tensor-style option data into a nested list of Option objects.
 
@@ -384,13 +384,74 @@ class Utils:
                     vega_path=vega_mat[:, opt_idx],
                     inactive=inactive_mat[:, opt_idx],
                     num_contract=0,  # this will be managed by the RL policy
-                    contract_size=contract_size,
+                    contract_size=self.contract_size,
                 )
                 episode_options.append(option)
 
             options_per_episode.append(episode_options)
 
         return options_per_episode
+
+
+    def agg_poisson_dist_vectorized(self, option_tensor_list):
+        """
+        Convert precomputed tensor-style option data into a list of SyntheticOption objects.
+
+        Parameters
+        ----------
+        option_tensor_list : list
+            Outer list is n_episodes long.
+            Each element is a list of option metrics: [price, delta, gamma, vega, inactive]
+            Each metric is a (n_steps, n_options) matrix.
+
+        contract_size : int
+            Number of units per contract.
+
+        Returns
+        -------
+        np.ndarray
+            A list of SyntheticOption objects in shape (n_episodes,), one for each episode.
+        """
+        n_episodes = len(option_tensor_list)
+        synthetic_options = []
+        # Shape: (num_episodes, num_steps)
+        poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(option_tensor_list[0][0].shape))
+
+        # Binomial draws: number of +1s per entry
+        num_pos = np.random.binomial(poisson_draws, 0.5)
+
+        # Net direction: (2 * num_pos - total options)
+        net_direction = 2 * num_pos - poisson_draws
+
+        for ep in range(n_episodes):
+            net_direction_ep = net_direction[ep]
+
+            price_mat, delta_mat, gamma_mat, vega_mat, inactive_mat = option_tensor_list[ep]
+            n_steps, n_opts = price_mat.shape
+
+            # Aggregate the metrics across all options for the episode
+            port_price = np.nansum(price_mat, axis=1) * net_direction_ep  # Sum across options for each time step
+            port_delta = np.nansum(delta_mat, axis=1) * net_direction_ep
+            port_gamma = np.nansum(gamma_mat, axis=1) * net_direction_ep
+            port_vega = np.nansum(vega_mat, axis=1)  * net_direction_ep
+            next_port_price = np.zeros_like(port_price)
+            next_port_price[:, 1:] = port_price[:, :-1]
+
+
+            # Create a SyntheticOption object for the episode
+            synthetic_option = SyntheticOption(
+                port_price=port_price,
+                next_port_price=next_port_price,
+                port_delta=port_delta,
+                port_gamma=port_gamma,
+                port_vega=port_vega,
+                inactive=np.zeros_like(port_price, dtype=np.bool8),  # Default inactive state
+                num_contract=self.num_conts_to_add, # Default number of contracts
+                contract_size=self.contract_size,
+            )
+            synthetic_options.append(synthetic_option)
+
+        return np.array(synthetic_options)
 
 
 
@@ -413,6 +474,7 @@ class Utils:
         print("Genrate Poisson arrival portfolio option prices and risk profiles")
         options = []
         num_opts_per_day = np.random.poisson(self.poisson_rate, a_prices.shape)
+        print("Poisson arrival options per day: ", num_opts_per_day)
         num_episode = a_prices.shape[0]
         num_step = a_prices.shape[1]
         max_num_opts = num_opts_per_day.max(axis=0) # maximum number of options for each time step
