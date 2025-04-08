@@ -20,7 +20,7 @@ from environment.Trading import Option, SyntheticOption
 from absl import flags
 FLAGS = flags.FLAGS
 import numpy as np
-
+from ..lmmsabr import LMMSABR
 random.seed(1)
 
 
@@ -248,7 +248,38 @@ class Utils:
         self.implied_vol = implied_vol
         return a_price, implied_vol
 
-    def init_env(self, lmm=None):
+
+    def generate_swaption_market_data(self):
+        lmm = LMMSABR
+        n_episodes = 2
+        # (n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[1], n_metrics)
+        hedge_swaption = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 6))
+        liab_swaption = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 6))
+        hedge_swap = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 2))
+        liab_swap = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 2))
+        # loop that assigns to the arrays
+        for i in tqdm(range(n_episodes)):
+            lmm.simulate(seed=i)
+            lmm.get_swap_matrix()
+            res = lmm.get_sabr_params()
+            hedge_swaption[i], hedge_swap[i] = res[0]
+            liab_swaption[i], liab_swap[i] = res[1]
+        
+        # generate poisson arrival options for the liab_swaption
+        poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(liab_swaption.shape[0], liab_swaption.shape[1], liab_swaption.shape[2]))
+        # Binomial draws: number of +1s per entry
+        num_pos = np.random.binomial(poisson_draws, 0.5)
+        # Net direction: (2 * num_pos - total options)
+        net_direction = 2 * num_pos - poisson_draws
+        # Assign the net direction to the liab_swaption
+        liab_swaption *= net_direction[:, :, :, None]
+
+        
+        
+        
+        return hedge_swaption, liab_swaption, hedge_swap, liab_swap
+
+    def init_env(self, lmm = False):
         """Initialize environment
         Entrypoint to simulate market dynamics: 
         1). stock prices 
@@ -262,7 +293,7 @@ class Utils:
             np.ndarray: implied volatility in shape (num_path, num_period)
         """
         if lmm:
-            return lmm
+            return self.generate_swaption_market_data()
         if self.sabr:
             return self.get_sim_path_sabr()
         elif self.gbm:
@@ -352,7 +383,7 @@ class Utils:
         # =========================================================================
 
 
-    def convert_tensor_to_option_objects(self, option_tensor_list):
+    def convert_tensor_to_option_objects(self, option_tensor_list, liab=False):
         """
         Convert precomputed tensor-style option data into a nested list of Option objects.
 
@@ -373,9 +404,20 @@ class Utils:
         """
         n_episodes = len(option_tensor_list)
         options_per_episode = []
+        factor = np.ones(n_episodes)
+        if liab:
+            # Shape: (num_episodes, num_steps)
+            poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(option_tensor_list[0][0].shape))
 
+            # Binomial draws: number of +1s per entry
+            num_pos = np.random.binomial(poisson_draws, 0.5)
+
+            # Net direction: (2 * num_pos - total options)
+            net_direction = 2 * num_pos - poisson_draws
+            factor = net_direction
+        
         for ep in range(n_episodes):
-            price_mat, delta_mat, gamma_mat, vega_mat, inactive_mat = option_tensor_list[ep]
+            price_mat, delta_mat, gamma_mat, vega_mat, inactive_mat = option_tensor_list[ep] * factor[ep]
             n_steps, n_opts = price_mat.shape
 
             episode_options = []
@@ -429,14 +471,14 @@ class Utils:
         for ep in range(n_episodes):
             net_direction_ep = net_direction[ep]
 
-            price_mat, delta_mat, gamma_mat, vega_mat, inactive_mat = option_tensor_list[ep]
+            price_mat, delta_mat, gamma_mat, vega_mat, inactive_mat = option_tensor_list[ep]* net_direction_ep
             n_steps, n_opts = price_mat.shape
 
             # Aggregate the metrics across all options for the episode
-            port_price = np.nansum(price_mat, axis=1) * net_direction_ep  # Sum across options for each time step
-            port_delta = np.nansum(delta_mat, axis=1) * net_direction_ep
-            port_gamma = np.nansum(gamma_mat, axis=1) * net_direction_ep
-            port_vega = np.nansum(vega_mat, axis=1)  * net_direction_ep
+            port_price = np.nansum(price_mat, axis=1)   # Sum across options for each time step
+            port_delta = np.nansum(delta_mat, axis=1) 
+            port_gamma = np.nansum(gamma_mat, axis=1) 
+            port_vega = np.nansum(vega_mat, axis=1)  
             next_port_price = np.zeros_like(port_price)
             next_port_price[:, 1:] = port_price[:, :-1]
 

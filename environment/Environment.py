@@ -12,7 +12,7 @@ from acme.utils import loggers
 
 import numpy as np
 
-from environment.Trading import MainPortfolio
+from environment.Trading import MainPortfolio, Greek
 
 @dataclasses.dataclass
 class StepResult:
@@ -75,7 +75,7 @@ class TradingEnv(gym.Env):
 
         # time to maturity array
         self.ttm_array = np.arange(self.utils.init_ttm, -self.utils.frq, -self.utils.frq)
-
+        # TODO: implement action and observation space to include delta vectors
         # Action space: HIGH value has to be adjusted with respect to the option used for hedging
         self.action_space = spaces.Box(low=np.array([0]), 
                                        high=np.array([1.0]), dtype=np.float32)
@@ -131,26 +131,67 @@ class TradingEnv(gym.Env):
             hed_action=action[0],
         )
         # action constraints
-        gamma_action_bound = -self.portfolio.get_gamma(self.t)/self.portfolio.hed_port.options[self.sim_episode, self.t].gamma_path[self.t]/self.utils.contract_size
-        action_low = [0, gamma_action_bound]
-        action_high = [0, gamma_action_bound]
+        # gamma_action_bound = -self.portfolio.get_gamma(self.t)/self.portfolio.hed_port.options[self.sim_episode, self.t].gamma_path[self.t]/self.utils.contract_size
+        # action_low = [0, gamma_action_bound]
+        # action_high = [0, gamma_action_bound]
         
+        # if FLAGS.vega_obs:
+        #     # vega bounds
+        #     vega_action_bound = -self.portfolio.get_vega(self.t)/self.portfolio.hed_port.options[self.sim_episode, self.t].vega_path[self.t]/self.utils.contract_size
+        #     action_low.append(vega_action_bound)
+        #     action_high.append(vega_action_bound)
+
+        # low_val = np.min(action_low)
+        # high_val = np.max(action_high)
+
+        # hed_share = low_val + action[0] * (high_val - low_val)
+        t = self.t
+        ep = self.sim_episode
+        hed_option = self.portfolio.hed_port.options
+
+        contract_size = self.utils.contract_size
+
+        # === Gamma hedge ===
+        gamma_hedge_unit = hed_option[ep, t, t, Greek.GAMMA]  # gamma per contract
+        portfolio_gamma = self.portfolio.get_gamma(t)
+
+        gamma_action_bound = -portfolio_gamma / (gamma_hedge_unit / contract_size)
+        action_low = [0]
+        action_high = [gamma_action_bound]
+
+        # === Vega hedge ===
         if FLAGS.vega_obs:
-            # vega bounds
-            vega_action_bound = -self.portfolio.get_vega(self.t)/self.portfolio.hed_port.options[self.sim_episode, self.t].vega_path[self.t]/self.utils.contract_size
+            vega_hedge_unit = hed_option[ep, t, t, Greek.VEGA]  # vega per contract
+            portfolio_vega = self.portfolio.get_vega(t)
+
+            vega_action_bound = -portfolio_vega / (vega_hedge_unit / contract_size)
             action_low.append(vega_action_bound)
             action_high.append(vega_action_bound)
 
+        # === Delta hedge ===
+        # NOTE: You’re currently using GAMMA here again. You probably meant to index DELTA.
+        delta_hedge_unit = hed_option[ep, t, t, Greek.DELTA]  # FIXED to DELTA
+        portfolio_delta = self.portfolio.get_delta(t)
+
+        delta_action_bound = -portfolio_delta / (delta_hedge_unit / contract_size)
+
+        # If you want to use delta in the same normalized way, add it here:
+        action_low.append(delta_action_bound)
+        action_high.append(delta_action_bound)
+
+        # === Hedge scaling from normalized action ===
         low_val = np.min(action_low)
         high_val = np.max(action_high)
 
         hed_share = low_val + action[0] * (high_val - low_val)
+
         result.hed_share = hed_share
 
 
         # current prices at t
         result.gamma_before_hedge = self.portfolio.get_gamma(self.t)
         result.vega_before_hedge = self.portfolio.get_vega(self.t)
+
         result.step_pnl = reward = self.portfolio.step(hed_share, self.t, result)
         result.gamma_after_hedge = self.portfolio.get_gamma(self.t)
         result.vega_after_hedge = self.portfolio.get_vega(self.t)
