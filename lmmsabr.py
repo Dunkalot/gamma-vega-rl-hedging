@@ -1162,8 +1162,6 @@ class LMMSABR:
         self.precompute_vol_surfaces()
         self.precompute_interpolation()
         self.simulate_forwards(seed=seed)
-        end_time = time.time()
-        #print(f"Simulation time k_mat: {end_time - start_time:.2f} seconds")
         return self.f_sim
     
     
@@ -1275,7 +1273,7 @@ class LMMSABR:
         inactive = np.isnan(self.price)
 
         # make returned results into a tensor of matrices so self.price, self.delta, self.gamma, self.vega, inactive is a tensor of shape (5, n_steps, n_swaps)
-        results = np.stack([self.swap_value, self.price, self.delta, self.gamma, self.vega, inactive], axis=0)
+        results = np.stack([self.price, self.delta, self.gamma, self.vega, inactive], axis=0), self.swap_value
         
 
         return results

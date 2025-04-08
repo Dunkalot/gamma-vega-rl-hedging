@@ -20,7 +20,7 @@ from environment.Trading import Option, SyntheticOption
 from absl import flags
 FLAGS = flags.FLAGS
 import numpy as np
-from ..test.
+
 random.seed(1)
 
 

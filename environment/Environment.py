@@ -167,7 +167,7 @@ class TradingEnv(gym.Env):
         result.state_price, result.state_gamma, result.state_hed_gamma = state[:3]
         if FLAGS.vega_obs:
             result.state_vega, result.state_hed_vega = state[3:]
-        
+        # TODO: look into this, it might be slowing down the code
         # for other info later
         info = {"path_row": self.sim_episode}
         if self.logger:
