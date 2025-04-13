@@ -31,26 +31,26 @@ class Utils:
                  poisson_rate=1, moneyness_mean=1.0, moneyness_std=0.0, ttms=None, 
                  num_conts_to_add = -1, contract_size = 100,
                  action_low=0, action_high=3, kappa = 0.0, svj_rho = -0.1, mu_s=0.2, sigma_sq_s=0.1, lambda_d=0.2, gbm = False, sabr=False):
-        if ttms is None:
+        #if ttms is None:
             # ttms = [60, 120, 240, 480]
-            ttms = [120]   # single ttm
+        #    ttms = [120]   # single ttm
         # Annual Return
-        self.mu = mu
+        #self.mu = mu
         # Annual Volatility
-        self.init_vol = init_vol
+        #self.init_vol = init_vol
         # Initial Asset Value
-        self.S = s
+        #self.S = s
         # Option Strike Price
-        self.K = k
+        #self.K = k
         # Annual Risk Free Rate
-        self.r = r
+        #self.r = r
         # Annual Dividend
-        self.q = q
+        #self.q = q
         # Annual Trading Day
-        self.T = t
         # frequency of trading
+        self.T = t
         self.frq = frq
-        self.dt = self.frq / self.T
+        #self.dt = self.frq / self.T
         # Number of simulations
         self.num_sim = num_sim
         # Initial time to maturity
