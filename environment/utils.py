@@ -20,17 +20,42 @@ from environment.Trading import Option, SyntheticOption
 from absl import flags
 FLAGS = flags.FLAGS
 import numpy as np
-#from ..lmmsabr import LMMSABR
+from environment.lmmsabr import LMMSABR, make_nss_yield_df, compute_6m_forward_dataframe
 random.seed(1)
 
 
 class Utils:
-    def __init__(self, init_ttm, np_seed, num_sim, mu=0.0, init_vol=0.2, 
-                 s=10, k=10, r=0, q=0, t=52, frq=1, spread=0,
-                 hed_ttm=60, beta=1, rho=-0.7, volvol=0.6, ds=0.001, 
-                 poisson_rate=1, moneyness_mean=1.0, moneyness_std=0.0, ttms=None, 
-                 num_conts_to_add = -1, contract_size = 100,
-                 action_low=0, action_high=3, kappa = 0.0, svj_rho = -0.1, mu_s=0.2, sigma_sq_s=0.1, lambda_d=0.2, gbm = False, sabr=False):
+    # def __init__(self, init_ttm, np_seed, num_sim, mu=0.0, init_vol=0.2, 
+    #              s=10, k=10, r=0, q=0, t=52, frq=1, spread=0,
+    #              hed_ttm=60, beta=1, rho=-0.7, volvol=0.6, ds=0.001, 
+    #              poisson_rate=1, moneyness_mean=1.0, moneyness_std=0.0, ttms=None, 
+    #              num_conts_to_add = -1, contract_size = 100,
+    #              action_low=0, action_high=3, kappa = 0.0, svj_rho = -0.1, mu_s=0.2, sigma_sq_s=0.1, lambda_d=0.2, gbm = False, sabr=False):
+    def __init__(self, n_episodes =1000, tau=0.5,
+        resolution=26,
+        tenor=4,
+        sim_time = 1,
+        t_max=None,
+        beta=0.5,
+        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42):
+        self.seed = seed
+        
+        
+        self.spread = spread
+        self.poisson_rate = poisson_rate
+        self.n_episodes = n_episodes
+        self.lmm:LMMSABR = LMMSABR(tau=tau,
+            resolution=resolution,
+            tenor=tenor,
+            sim_time=sim_time,
+            t_max=t_max,
+            beta=beta,
+            B=B,
+            swap_hedge_expiry=swap_hedge_expiry,
+            swap_client_expiry=swap_client_expiry
+        )
+
+        self.num_period = self.lmm.swap_sim_shape[0] # number of steps
         #if ttms is None:
             # ttms = [60, 120, 240, 480]
         #    ttms = [120]   # single ttm
@@ -48,237 +73,229 @@ class Utils:
         #self.q = q
         # Annual Trading Day
         # frequency of trading
-        self.T = t
-        self.frq = frq
-        #self.dt = self.frq / self.T
-        # Number of simulations
-        self.num_sim = num_sim
-        # Initial time to maturity
-        self.init_ttm = init_ttm
-        # Number of periods
-        self.num_period = int(self.init_ttm / self.frq)
-        # Time to maturity for hedging options
-        self.hed_ttm = hed_ttm
-        # Add Option Moneyness mean, std
-        self.moneyness_mean = moneyness_mean
-        self.moneyness_std = moneyness_std
-        # Spread of buying and selling options
-        self.spread = spread
-        # Action space
-        self.action_low = action_low
-        self.action_high = action_high
-        # SABR parameters
-        self.beta = beta
-        self.rho = rho
-        self.volvol = volvol
-        self.ds = ds
-        self.implied_vol = None
-        self.poisson_rate = poisson_rate
-        self.ttms = ttms
-        self.num_conts_to_add = num_conts_to_add
-        # contract size, each option contract corresponds to how many underlying shares
-        self.contract_size = contract_size
-        # Stochastic Processes Indocators
-        self.gbm = gbm
-        self.sabr = sabr
+        # self.T = t
+        # self.frq = frq
+        # #self.dt = self.frq / self.T
+        # # Number of simulations
+        # self.num_sim = num_sim
+        # # Initial time to maturity
+        # self.init_ttm = init_ttm
+        # # Number of periods
+        # self.num_period = int(self.init_ttm / self.frq)
+        # # Time to maturity for hedging options
+        # self.hed_ttm = hed_ttm
+        # # Add Option Moneyness mean, std
+        # #self.moneyness_mean = moneyness_mean
+        # #self.moneyness_std = moneyness_std
+        # # Spread of buying and selling options
+        # self.spread = spread
+        # # Action space
+        # self.action_low = action_low
+        # self.action_high = action_high
+        # # SABR parameters
+        # self.beta = beta
+        # self.rho = rho
+        # self.volvol = volvol
+        # self.ds = ds
+        # self.implied_vol = None
+        # self.poisson_rate = poisson_rate
+        # self.ttms = ttms
+        # self.num_conts_to_add = num_conts_to_add
+        # # contract size, each option contract corresponds to how many underlying shares
+        # self.contract_size = contract_size
+        # # Stochastic Processes Indocators
+        # self.gbm = gbm
+        # self.sabr = sabr
 
-        # set the np random seed
-        np.random.seed(np_seed)
-        self.seed = np_seed
+        # # set the np random seed
+        # np.random.seed(np_seed)
+        # self.seed = np_seed
 
-    def _brownian_sim(self):
-        z = np.random.normal(size=(self.num_sim, self.num_period + 1))
+    # def _brownian_sim(self):
+    #     z = np.random.normal(size=(self.num_sim, self.num_period + 1))
 
-        a_price = np.zeros((self.num_sim, self.num_period + 1))
-        a_price[:, 0] = self.S
+    #     a_price = np.zeros((self.num_sim, self.num_period + 1))
+    #     a_price[:, 0] = self.S
 
-        for t in range(self.num_period):
-            a_price[:, t + 1] = a_price[:, t] * np.exp(
-                (self.mu - (self.init_vol ** 2) / 2) * self.dt + self.init_vol * np.sqrt(self.dt) * z[:, t]
-            )
-        return a_price
+    #     for t in range(self.num_period):
+    #         a_price[:, t + 1] = a_price[:, t] * np.exp(
+    #             (self.mu - (self.init_vol ** 2) / 2) * self.dt + self.init_vol * np.sqrt(self.dt) * z[:, t]
+    #         )
+    #     return a_price
 
     # BSM Call Option Pricing Formula & BS Delta, Gamma, Vega formula
     # T here is time to maturity
-    @staticmethod
-    def bs_call(iv, ttm: np.ndarray, S: np.ndarray, K, r, q, T=250):
-        """Black Scholes Formula
+    # @staticmethod
+    # def bs_call(iv, ttm: np.ndarray, S: np.ndarray, K, r, q, T=250):
+    #     """Black Scholes Formula
 
-        Args:
-            iv (np.ndarray): implied volatility. it can be a scalar for constant vol; 
-                             or it has the same shape of stock price S for stochastic vol.
-            ttm (np.ndarray): time to maturity, it should have the same channel dim as stock price S.
-                              If batch dim is not presented, ttm batch dim will be expanded to match S.
-            S (np.ndarray): stock price.
-            K (np.ndarray): option strike, it should have the same dim as stock price S.
-            r (float): risk free rate
-            q (float): dividend yield.
-            T (int, optional): business days in a year. Defaults to 250.
+    #     Args:
+    #         iv (np.ndarray): implied volatility. it can be a scalar for constant vol; 
+    #                          or it has the same shape of stock price S for stochastic vol.
+    #         ttm (np.ndarray): time to maturity, it should have the same channel dim as stock price S.
+    #                           If batch dim is not presented, ttm batch dim will be expanded to match S.
+    #         S (np.ndarray): stock price.
+    #         K (np.ndarray): option strike, it should have the same dim as stock price S.
+    #         r (float): risk free rate
+    #         q (float): dividend yield.
+    #         T (int, optional): business days in a year. Defaults to 250.
 
-        Returns:
-            np.ndarray: option price in the same shape of stock price S.
-            np.ndarray: option delta in the same shape of stock price S.
-            np.ndarray: option gamma in the same shape of stock price S.
-            np.ndarray: option vega in the same shape of stock price S.
-        """
-        if (ttm.ndim + 1) == S.ndim:
-            # expand batch dim
-            ttm = np.tile(np.expand_dims(ttm, 0), (S.shape[0],) + tuple([1]*ttm.ndim))
-        assert (ttm.ndim == S.ndim), 'Maturity dim does not match spot dim'
-        for i in range(ttm.ndim):
-            assert ttm.shape[i] == S.shape[i], f'Maturity dim {i} size does not match spot dim {i} size.'
-        # active option
-        active_option = (ttm > 0).astype(np.uint0)
-        matured_option = (ttm == 0).astype(np.uint0)
+    #     Returns:
+    #         np.ndarray: option price in the same shape of stock price S.
+    #         np.ndarray: option delta in the same shape of stock price S.
+    #         np.ndarray: option gamma in the same shape of stock price S.
+    #         np.ndarray: option vega in the same shape of stock price S.
+    #     """
+    #     if (ttm.ndim + 1) == S.ndim:
+    #         # expand batch dim
+    #         ttm = np.tile(np.expand_dims(ttm, 0), (S.shape[0],) + tuple([1]*ttm.ndim))
+    #     assert (ttm.ndim == S.ndim), 'Maturity dim does not match spot dim'
+    #     for i in range(ttm.ndim):
+    #         assert ttm.shape[i] == S.shape[i], f'Maturity dim {i} size does not match spot dim {i} size.'
+    #     # active option
+    #     active_option = (ttm > 0).astype(np.uint0)
+    #     matured_option = (ttm == 0).astype(np.uint0)
 
-        # active option
-        fT = np.maximum(ttm, 1)/T
-        d1 = (np.log(S / K) + (r - q + iv * iv / 2) * np.abs(fT)) / (iv * np.sqrt(fT))
-        d2 = d1 - iv * np.sqrt(fT)
-        n_prime = np.exp(-1 * d1 * d1 / 2) / np.sqrt(2 * np.pi)
+    #     # active option
+    #     fT = np.maximum(ttm, 1)/T
+    #     d1 = (np.log(S / K) + (r - q + iv * iv / 2) * np.abs(fT)) / (iv * np.sqrt(fT))
+    #     d2 = d1 - iv * np.sqrt(fT)
+    #     n_prime = np.exp(-1 * d1 * d1 / 2) / np.sqrt(2 * np.pi)
 
-        active_bs_price = S * np.exp(-q * fT) * norm.cdf(d1) - K * np.exp(-r * fT) * norm.cdf(d2)
-        active_bs_delta = np.exp(-q * fT) * norm.cdf(d1)
-        active_bs_gamma = (n_prime * np.exp(-q * fT)) / (S * iv * np.sqrt(fT))
-        active_bs_vega = (1/100) * S * np.exp(-q * fT) * np.sqrt(fT) * n_prime
+    #     active_bs_price = S * np.exp(-q * fT) * norm.cdf(d1) - K * np.exp(-r * fT) * norm.cdf(d2)
+    #     active_bs_delta = np.exp(-q * fT) * norm.cdf(d1)
+    #     active_bs_gamma = (n_prime * np.exp(-q * fT)) / (S * iv * np.sqrt(fT))
+    #     active_bs_vega = (1/100) * S * np.exp(-q * fT) * np.sqrt(fT) * n_prime
         
-        # matured option
-        payoff = np.maximum(S - K, 0)
+    #     # matured option
+    #     payoff = np.maximum(S - K, 0)
 
-        # consolidate
-        price = active_option*active_bs_price + matured_option*payoff
-        delta = active_option*active_bs_delta
-        gamma = active_option*active_bs_gamma
-        vega = active_option*active_bs_vega
+    #     # consolidate
+    #     price = active_option*active_bs_price + matured_option*payoff
+    #     delta = active_option*active_bs_delta
+    #     gamma = active_option*active_bs_gamma
+    #     vega = active_option*active_bs_vega
 
-        return price, delta, gamma, vega
+    #     return price, delta, gamma, vega
 
-    def get_sim_path(self):
-        """ Simulate BSM underlying dynamic 
+    # def get_sim_path(self):
+    #     """ Simulate BSM underlying dynamic 
         
-        Returns:
-            np.ndarray: underlying asset price in shape (num_path, num_period)
-            np.ndarray: scalar constant vol
-        """
+    #     Returns:
+    #         np.ndarray: underlying asset price in shape (num_path, num_period)
+    #         np.ndarray: scalar constant vol
+    #     """
 
-        # asset price 2-d array
-        print("Generating asset price paths")
-        a_price = self._brownian_sim()
+    #     # asset price 2-d array
+    #     print("Generating asset price paths")
+    #     a_price = self._brownian_sim()
 
-        return a_price, np.array(self.init_vol)
+    #     return a_price, np.array(self.init_vol)
 
-    def _sabr_sim(self):
-        """Simulate SABR model
-        1). stock price
-        2). instantaneous vol
+    # def _sabr_sim(self):
+    #     """Simulate SABR model
+    #     1). stock price
+    #     2). instantaneous vol
 
-        Returns:
-            np.ndarray: stock price in shape (num_path, num_period)
-            np.ndarray: instantaneous vol in shape (num_path, num_period)
-        """
-        qs = np.random.normal(size=(self.num_sim, self.num_period + 1))
-        qi = np.random.normal(size=(self.num_sim, self.num_period + 1))
-        qv = self.rho * qs + np.sqrt(1 - self.rho * self.rho) * qi
+    #     Returns:
+    #         np.ndarray: stock price in shape (num_path, num_period)
+    #         np.ndarray: instantaneous vol in shape (num_path, num_period)
+    #     """
+    #     qs = np.random.normal(size=(self.num_sim, self.num_period + 1))
+    #     qi = np.random.normal(size=(self.num_sim, self.num_period + 1))
+    #     qv = self.rho * qs + np.sqrt(1 - self.rho * self.rho) * qi
 
-        vol = np.zeros((self.num_sim, self.num_period + 1))
-        vol[:, 0] = self.init_vol
+    #     vol = np.zeros((self.num_sim, self.num_period + 1))
+    #     vol[:, 0] = self.init_vol
 
-        a_price = np.zeros((self.num_sim, self.num_period + 1))
-        a_price[:, 0] = self.S
+    #     a_price = np.zeros((self.num_sim, self.num_period + 1))
+    #     a_price[:, 0] = self.S
 
-        for t in range(self.num_period):
-            gvol = vol[:, t] * (a_price[:, t] ** (self.beta - 1))
-            a_price[:, t + 1] = a_price[:, t] * np.exp(
-                (self.mu - (gvol ** 2) / 2) * self.dt + gvol * np.sqrt(self.dt) * qs[:, t]
-            )
-            vol[:, t + 1] = vol[:, t] * np.exp(
-                -self.volvol * self.volvol * 0.5 * self.dt + self.volvol * qv[:, t] * np.sqrt(self.dt)
-            )
+    #     for t in range(self.num_period):
+    #         gvol = vol[:, t] * (a_price[:, t] ** (self.beta - 1))
+    #         a_price[:, t + 1] = a_price[:, t] * np.exp(
+    #             (self.mu - (gvol ** 2) / 2) * self.dt + gvol * np.sqrt(self.dt) * qs[:, t]
+    #         )
+    #         vol[:, t + 1] = vol[:, t] * np.exp(
+    #             -self.volvol * self.volvol * 0.5 * self.dt + self.volvol * qv[:, t] * np.sqrt(self.dt)
+    #         )
 
-        return a_price, vol
+    #     return a_price, vol
 
-    def _sabr_implied_vol(self, vol, tt, price):
-        """Convert SABR instantaneous vol to option implied vol
+    # def _sabr_implied_vol(self, vol, tt, price):
+    #     """Convert SABR instantaneous vol to option implied vol
 
-        Args:
-            vol (np.ndarray): SABR instantaneous vol in shape (num_path, num_period)
-            tt (np.ndarray): time to maturity in shape (num_period,)
-            price (np.ndarray): underlying stock price in shape (num_path, num_period)
+    #     Args:
+    #         vol (np.ndarray): SABR instantaneous vol in shape (num_path, num_period)
+    #         tt (np.ndarray): time to maturity in shape (num_period,)
+    #         price (np.ndarray): underlying stock price in shape (num_path, num_period)
 
-        Returns:
-            np.ndarray: implied vol in shape (num_path, num_period)
-        """
-        F = price * np.exp((self.r - self.q) * tt)
-        x = (F * self.K) ** ((1 - self.beta) / 2)
-        y = (1 - self.beta) * np.log(F / self.K)
-        A = vol / (x * (1 + y * y / 24 + y * y * y * y / 1920))
-        B = 1 + tt * (
-                ((1 - self.beta) ** 2) * (vol * vol) / (24 * x * x)
-                + self.rho * self.beta * self.volvol * vol / (4 * x)
-                + self.volvol * self.volvol * (2 - 3 * self.rho * self.rho) / 24
-        )
-        Phi = (self.volvol * x / vol) * np.log(F / self.K)
-        Chi = np.log((np.sqrt(1 - 2 * self.rho * Phi + Phi * Phi) + Phi - self.rho) / (1 - self.rho))
+    #     Returns:
+    #         np.ndarray: implied vol in shape (num_path, num_period)
+    #     """
+    #     F = price * np.exp((self.r - self.q) * tt)
+    #     x = (F * self.K) ** ((1 - self.beta) / 2)
+    #     y = (1 - self.beta) * np.log(F / self.K)
+    #     A = vol / (x * (1 + y * y / 24 + y * y * y * y / 1920))
+    #     B = 1 + tt * (
+    #             ((1 - self.beta) ** 2) * (vol * vol) / (24 * x * x)
+    #             + self.rho * self.beta * self.volvol * vol / (4 * x)
+    #             + self.volvol * self.volvol * (2 - 3 * self.rho * self.rho) / 24
+    #     )
+    #     Phi = (self.volvol * x / vol) * np.log(F / self.K)
+    #     Chi = np.log((np.sqrt(1 - 2 * self.rho * Phi + Phi * Phi) + Phi - self.rho) / (1 - self.rho))
 
-        SABRIV = np.where(F == self.K, vol * B / (F ** (1 - self.beta)), A * B * Phi / Chi)
+    #     SABRIV = np.where(F == self.K, vol * B / (F ** (1 - self.beta)), A * B * Phi / Chi)
 
-        return SABRIV
+    #     return SABRIV
 
-    def get_sim_path_sabr(self):
-        """ Simulate SABR underlying dynamic and implied volatility dynamic 
+    # def get_sim_path_sabr(self):
+    #     """ Simulate SABR underlying dynamic and implied volatility dynamic 
         
-        Returns:
-            np.ndarray: underlying asset price in shape (num_path, num_period)
-            np.ndarray: implied volatility in shape (num_path, num_period)
-        """
+    #     Returns:
+    #         np.ndarray: underlying asset price in shape (num_path, num_period)
+    #         np.ndarray: implied volatility in shape (num_path, num_period)
+    #     """
 
-        # asset price 2-d array; sabr_vol
-        print("Generating asset price paths (SABR)")
-        a_price, sabr_vol = self._sabr_sim()
+    #     # asset price 2-d array; sabr_vol
+    #     print("Generating asset price paths (SABR)")
+    #     a_price, sabr_vol = self._sabr_sim()
 
-        # time to maturity "rank 1" array: e.g. [M, M-1, ..., 0]
-        ttm = np.arange(self.init_ttm, -self.frq, -self.frq, dtype=np.int16)
+    #     # time to maturity "rank 1" array: e.g. [M, M-1, ..., 0]
+    #     ttm = np.arange(self.init_ttm, -self.frq, -self.frq, dtype=np.int16)
 
-        # BS price 2-d array and bs delta 2-d array
-        print("Generating implied vol")
+    #     # BS price 2-d array and bs delta 2-d array
+    #     print("Generating implied vol")
 
-        # SABR implied vol
-        implied_vol = self._sabr_implied_vol(sabr_vol, ttm / self.T, a_price)
+    #     # SABR implied vol
+    #     implied_vol = self._sabr_implied_vol(sabr_vol, ttm / self.T, a_price)
 
-        self.implied_vol = implied_vol
-        return a_price, implied_vol
+    #     self.implied_vol = implied_vol
+    #     return a_price, implied_vol
 
 
     def generate_swaption_market_data(self):
-        pass # TODO: UNCOMMENT WHEN READY
-        # lmm = LMMSABR
-        # n_episodes = 2
-        # # (n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[1], n_metrics)
-        # hedge_swaption = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 6))
-        # liab_swaption = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 6))
-        # hedge_swap = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 2))
-        # liab_swap = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 2))
-        # # loop that assigns to the arrays
-        # for i in tqdm(range(n_episodes)):
-        #     lmm.simulate(seed=i)
-        #     lmm.get_swap_matrix()
-        #     res = lmm.get_sabr_params()
-        #     hedge_swaption[i], hedge_swap[i] = res[0]
-        #     liab_swaption[i], liab_swap[i] = res[1]
-        
-        # # generate poisson arrival options for the liab_swaption
-        # poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(liab_swaption.shape[0], liab_swaption.shape[1], liab_swaption.shape[2]))
-        # # Binomial draws: number of +1s per entry
-        # num_pos = np.random.binomial(poisson_draws, 0.5)
-        # # Net direction: (2 * num_pos - total options)
-        # net_direction = 2 * num_pos - poisson_draws
-        # # Assign the net direction to the liab_swaption
-        # liab_swaption *= net_direction[:, :, :, None]
+        df_fwd = compute_6m_forward_dataframe(make_nss_yield_df())
+        print("sampling starting conditions...")
+        self.lmm.sample_starting_conditions(df_fwd, curve_samples=np.minimum(self.n_episodes,len(df_fwd)))
+        print("priming the initial state...")
+        self.lmm.prime()
+        hedge_swaption, liab_swaption, hedge_swap, liab_swap = self.lmm.generate_episodes(self.n_episodes)
 
         
+        # generate poisson arrival options for the liab_swaption
+        poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(liab_swaption.shape[0], liab_swaption.shape[1], liab_swaption.shape[2]))
+        # Binomial draws: number of +1s per entry
+        num_pos = np.random.binomial(poisson_draws, 0.5)
+        # Net direction: (2 * num_pos - total options)
+        net_direction = 2 * num_pos - poisson_draws
+        # Assign the net direction to the liab_swaption
+        liab_swaption *= net_direction[:, :, :, None]
+
         
-        
-        #return hedge_swaption, liab_swaption, hedge_swap, liab_swap
+        return hedge_swaption, liab_swaption, hedge_swap, liab_swap
+    
+    
     def init_market_data(self, hedge_swaption, liab_swaption, hedge_swap, liab_swap):
         self.hedge_swaption = hedge_swaption
         self.liab_swaption = liab_swaption
@@ -299,7 +316,7 @@ class Utils:
             np.ndarray: implied volatility in shape (num_path, num_period)
         """
         if lmm:
-            
+            self.lmm = LMMSABR()
             return self.hedge_swaption, self.liab_swaption, self.hedge_swap, self.liab_swap
             #return self.generate_swaption_market_data()
         if self.sabr:

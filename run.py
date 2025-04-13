@@ -239,17 +239,18 @@ def main(argv):
     if FLAGS.logger_prefix:
         work_folder = FLAGS.logger_prefix + "/" + work_folder
     # Create an environment, grab the spec, and use it to create networks.
-    utils = Utils(init_ttm=FLAGS.init_ttm, np_seed=1234, num_sim=FLAGS.train_sim, spread=FLAGS.spread, volvol=FLAGS.vov, sabr=FLAGS.sabr, gbm=FLAGS.gbm, hed_ttm=FLAGS.hed_ttm,
-                  init_vol=FLAGS.init_vol, poisson_rate=FLAGS.poisson_rate, 
-                  moneyness_mean=FLAGS.moneyness_mean, moneyness_std=FLAGS.moneyness_std, 
-                  mu=FLAGS.mu, ttms=[int(ttm) for ttm in FLAGS.liab_ttms],
-                 action_low=float(FLAGS.action_space[0]), action_high=float(FLAGS.action_space[1]))
+    # utils = Utils(init_ttm=FLAGS.init_ttm, np_seed=1234, num_sim=FLAGS.train_sim, spread=FLAGS.spread, volvol=FLAGS.vov, sabr=FLAGS.sabr, gbm=FLAGS.gbm, hed_ttm=FLAGS.hed_ttm,
+    #               init_vol=FLAGS.init_vol, poisson_rate=FLAGS.poisson_rate, 
+    #               moneyness_mean=FLAGS.moneyness_mean, moneyness_std=FLAGS.moneyness_std, 
+    #               mu=FLAGS.mu, ttms=[int(ttm) for ttm in FLAGS.liab_ttms],
+    #              action_low=float(FLAGS.action_space[0]), action_high=float(FLAGS.action_space[1]))
+    utils = Utils(n_episodes=FLAGS.train_sim, tenor=4)
     environment = make_environment(utils=utils)
     environment_spec = specs.make_environment_spec(environment)
     if FLAGS.critic == 'c51':
         agent_networks = make_networks(action_spec=environment_spec.actions, max_time_steps=FLAGS.init_ttm)
     elif 'qr' in FLAGS.critic:
-        agent_networks = make_quantile_networks(action_spec=environment_spec.actions, max_time_steps=FLAGS.init_ttm)
+        agent_networks = make_quantile_networks(action_spec=environment_spec.actions)
     elif FLAGS.critic == 'iqn':
         assert FLAGS.obj_func == 'cvar', 'IQN only support CVaR objective.'
         agent_networks = make_iqn_networks(action_spec=environment_spec.actions,cvar_th=FLAGS.threshold, max_time_steps=FLAGS.init_ttm)
@@ -300,11 +301,13 @@ def main(argv):
 
     # Create the evaluation actor and loop.
     eval_actor = actors.FeedForwardActor(policy_network=eval_policy)
-    eval_utils = Utils(init_ttm=FLAGS.init_ttm, np_seed=FLAGS.eval_seed, num_sim=FLAGS.eval_sim, spread=FLAGS.spread, volvol=FLAGS.vov, sabr=FLAGS.sabr, gbm=FLAGS.gbm, hed_ttm=FLAGS.hed_ttm,
-                       init_vol=FLAGS.init_vol, poisson_rate=FLAGS.poisson_rate, 
-                       moneyness_mean=FLAGS.moneyness_mean, moneyness_std=FLAGS.moneyness_std, 
-                       mu=0.0, ttms=[int(ttm) for ttm in FLAGS.liab_ttms],
-                       action_low=float(FLAGS.action_space[0]), action_high=float(FLAGS.action_space[1]))
+    # eval_utils = Utils(init_ttm=FLAGS.init_ttm, np_seed=FLAGS.eval_seed, num_sim=FLAGS.eval_sim, spread=FLAGS.spread, volvol=FLAGS.vov, sabr=FLAGS.sabr, gbm=FLAGS.gbm, hed_ttm=FLAGS.hed_ttm,
+    #                    init_vol=FLAGS.init_vol, poisson_rate=FLAGS.poisson_rate, 
+    #                    moneyness_mean=FLAGS.moneyness_mean, moneyness_std=FLAGS.moneyness_std, 
+    #                    mu=0.0, ttms=[int(ttm) for ttm in FLAGS.liab_ttms],
+    #                    action_low=float(FLAGS.action_space[0]), action_high=float(FLAGS.action_space[1]))
+    # TODO: FIND UD AF HVORFOR DEN TERMINERER UDEN AT EVALUATE
+    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4)
     eval_env = make_environment(utils=eval_utils, logger=make_logger(work_folder,'eval_env'))
     eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])
     eval_loop.run(num_episodes=FLAGS.eval_sim)   

@@ -613,7 +613,7 @@ class MainPortfolio(AssetInterface):
         super().__init__()
         self.utils = utils
         #self.a_price, self.vol = utils.init_env()
-        hedge_swaption, liab_swaption, hedge_swap, liab_swap = utils.init_env(lmm=True)
+        hedge_swaption, liab_swaption, hedge_swap, liab_swap = utils.generate_swaption_market_data()
         
         self.liab_port = SwaptionLiabilityPortfolio(utils, liab_swaption)
         #self.hed_port = Portfolio(utils, utils.atm_hedges, self.a_price, self.vol)
@@ -783,5 +783,5 @@ class MainPortfolio(AssetInterface):
         result.hed_port_pnl = self.hed_port.step(t)
         result.stock_pnl = self.underlying.step(t)
         reward += (result.liab_port_pnl + result.hed_port_pnl + result.stock_pnl)
-        print("reward", reward)
+        #print("reward", reward)
         return reward

@@ -153,7 +153,7 @@ class TradingEnv(gym.Env):
 
         self.t = 0
 
-        self.portfolio.liab_port.add(self.sim_episode, self.t, self.utils.num_conts_to_add)
+        self.portfolio.liab_port.add(self.sim_episode, self.t, -1) # just primes the episode
 
         return self.portfolio.get_state(self.t)
 
