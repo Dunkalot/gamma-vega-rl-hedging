@@ -104,17 +104,17 @@ class Swaps(AssetInterface):
             price_path (np.ndarray): simulated swap prices in shape (num_episode, num_step, num_swap)
         """
         super().__init__()
-        self.price_path_hed = price_path_hed
-        self.price_path_liab = price_path_liab
+        self.swap_data_hed: np.ndarray = price_path_hed
+        self.swap_data_liab: np.ndarray = price_path_liab
         self.active_path = []
-        self.position_hed = np.zeros((self.price_path_hed.shape[1], self.price_path_hed.shape[2]))  # shape: [steps, swaps]
-        self.position_liab = np.zeros((self.price_path_liab.shape[1], self.price_path_liab.shape[2]))
+        self.position_hed = np.zeros((self.swap_data_hed.shape[1], self.swap_data_hed.shape[2]))  # shape: [steps, swaps]
+        self.position_liab = np.zeros((self.swap_data_liab.shape[1], self.swap_data_liab.shape[2]))
 
 
     def set_path(self, sim_episode):
         # joint so the t points to the same time step in both hedging and liability paths
-        self.active_path_hed = self.price_path_hed[sim_episode, :, :,:]
-        self.active_path_liab = self.price_path_liab[sim_episode, :, :, :]
+        self.active_path_hed = self.swap_data_hed[sim_episode, :, :,:]
+        self.active_path_liab = self.swap_data_liab[sim_episode, :, :, :]
 
         self.episode = sim_episode
         self.position = 0
@@ -139,279 +139,285 @@ class Swaps(AssetInterface):
         pnl = pnl_hed + pnl_liab
         return pnl
 
-    def get_value(self, t):
-        """swap value at time t"""
-        val_hed = self.position_hed * self.active_path_hed[t, :, SwapKeys.PRICE]
-        val_liab = self.position_liab * self.active_path_liab[t, :, SwapKeys.PRICE]
+    def get_value(self, t) -> float:
+        """swap value at time t. Only shows the actively traded swap at time t"""
+        #print(self.position_hed)
+        val_hed =  self.active_path_hed[t, t, SwapKeys.PRICE]
+        val_liab = self.active_path_liab[t, t, SwapKeys.PRICE]
         # sum over all swaps
-        val_hed = np.nansum(val_hed)
-        val_liab = np.nansum(val_liab)
+        val_hed = val_hed
+        val_liab = val_hed
+        #print(val_hed.shape)
         # this is the net value of the swap
-        val = val_hed + val_liab
+        val = np.array([val_hed, val_liab])
         return val
     
-    def get_delta(self, t):
+    def get_delta_vec(self, t):
         """swap delta at time t"""
         # concatenate at find the delta at time t, this is mainly important for when when some are not active, as they should be 0 then.
-        return np.concatenate([self.position_hed, self.position_liab])[t]# TODO: IMPLEMENT ANNUITY (DV01) WEIGHTING LATER
+        self.delta_vec = np.concatenate([self.position_hed, self.position_liab], axis=1)
+        #print(self.delta_vec[t].shape)
+        return self.delta_vec[t]# TODO: IMPLEMENT ANNUITY (DV01) WEIGHTING LATER
 
     def get_gamma(self, t):
         """swap gamma at time t"""
         return 0
 
+    def get_delta(self, t):
+        raise NotImplementedError("get_delta is not implemented for Swaps, use get_delta_vec instead")
     def get_vega(self, t):
         """swap vega at time t"""
         return 0
-    def set_position(self,t, action):
+    def set_position(self,t, action_swap_hed, action_swap_liab):
         """set position of the swap at the inception of swap"""
-        pos_hed = action[-2] # TODO actually set the action to be something meaningful
-        pos_liab = action[-1]
+        pos_hed = action_swap_hed # TODO actually set the action to be something meaningful
+        pos_liab = action_swap_liab
         # check if the position is a float
-        assert type(pos_hed) == float
-        assert type(pos_liab) == float
         mask_hed = self.active_path_hed[:,:, SwapKeys.ACTIVE]
         mask_liab = self.active_path_liab[:,:, SwapKeys.ACTIVE]
         # set the position of the swap at the inception of swap, we set the whole column as the position is unchangeable and layter set inactive spots to 0
         self.position_hed[:,t] = pos_hed
         self.position_liab[:,t] = pos_liab
         # make sure the position is set to 0 if the swap is not active
-        self.position_hed[~mask_hed] = 0
-        self.position_liab[~mask_liab] = 0
+        self.position_hed *= mask_hed
+        self.position_liab *= mask_liab
 
 
 class Option(AssetInterface):
-    """Option storing its position information, price and risk profiles within its simulation path
+    pass
+    # """Option storing its position information, price and risk profiles within its simulation path
 
-        Price and risk profiles are in shape of (num_steps,)
-        The option is active only when current time step passes its initialization time, and also
-        time step is before its maturity time along the simulation trajectory.
-        Inactive is a vector with same shape as (num_steps,), which tracks whether the
-        option is inactive or not.
-        If option is inactive, its price and risk profile will be zero. 
-    """
-    def __init__(self, 
-                 price_path, 
-                 delta_path, 
-                 gamma_path, 
-                 vega_path, 
-                 inactive, 
-                 num_contract,
-                 contract_size=100):
-        """Constructor
+    #     Price and risk profiles are in shape of (num_steps,)
+    #     The option is active only when current time step passes its initialization time, and also
+    #     time step is before its maturity time along the simulation trajectory.
+    #     Inactive is a vector with same shape as (num_steps,), which tracks whether the
+    #     option is inactive or not.
+    #     If option is inactive, its price and risk profile will be zero. 
+    # """
+    # def __init__(self, 
+    #              price_path, 
+    #              delta_path, 
+    #              gamma_path, 
+    #              vega_path, 
+    #              inactive, 
+    #              num_contract,
+    #              contract_size=100):
+    #     """Constructor
         
-        Args:
-            price_path (np.ndarray): option price
-            delta_path (np.ndarray): option delta 
-            gamma_path (np.ndarray): option gamma
-            vega_path (np.ndarray): option vega
-            inactive (np.ndarray): boolean array indicates option active status (True if it is inactive, o.w. False)
-            num_contract (np.ndarray): number of contracts that is purchased (positive value) or sold (negative value).
-            contract_size (int): one contract corresponds to how many underlying shares. (Default: 100)
-        """
-        super().__init__()
-        self.price_path = price_path
-        self.delta_path = delta_path
-        self.gamma_path = gamma_path
-        self.vega_path = vega_path
-        self.num_contract = num_contract
-        self.contract_size = contract_size
-        self.inactive = inactive
+    #     Args:
+    #         price_path (np.ndarray): option price
+    #         delta_path (np.ndarray): option delta 
+    #         gamma_path (np.ndarray): option gamma
+    #         vega_path (np.ndarray): option vega
+    #         inactive (np.ndarray): boolean array indicates option active status (True if it is inactive, o.w. False)
+    #         num_contract (np.ndarray): number of contracts that is purchased (positive value) or sold (negative value).
+    #         contract_size (int): one contract corresponds to how many underlying shares. (Default: 100)
+    #     """
+    #     super().__init__()
+    #     self.price_path = price_path
+    #     self.delta_path = delta_path
+    #     self.gamma_path = gamma_path
+    #     self.vega_path = vega_path
+    #     self.num_contract = num_contract
+    #     self.contract_size = contract_size
+    #     self.inactive = inactive
 
-    def step(self, t):
-        """Step on time t and generate option P&L
+    # def step(self, t):
+    #     """Step on time t and generate option P&L
 
-        Args:
-            t (int): step time t
+    #     Args:
+    #         t (int): step time t
 
-        Returns:
-            float: option P&L from time t to t+1
-        """
-        reward = 0
-        if not self.inactive[t+1]:
-            cur_option_price = self.price_path[t]
-            next_option_price = self.price_path[t+1]
-            reward = (next_option_price - cur_option_price) * self.num_contract * self.contract_size
+    #     Returns:
+    #         float: option P&L from time t to t+1
+    #     """
+    #     reward = 0
+    #     if not self.inactive[t+1]:
+    #         cur_option_price = self.price_path[t]
+    #         next_option_price = self.price_path[t+1]
+    #         reward = (next_option_price - cur_option_price) * self.num_contract * self.contract_size
 
-        return reward
+    #     return reward
 
-    def _get_profile(self, t, profile_path):
-        """Get price or risk profile at time t
+    # def _get_profile(self, t, profile_path):
+    #     """Get price or risk profile at time t
 
-        Args:
-            t (int): step time
-            profile_path (np.ndarray): option price path or risk profile path
+    #     Args:
+    #         t (int): step time
+    #         profile_path (np.ndarray): option price path or risk profile path
 
-        Returns:
-            float: if option is active at time t, return its value; o.w. return 0
-        """
-        if not self.inactive[t]:
-            return profile_path[t] * self.num_contract * self.contract_size
-        else:
-            return 0
+    #     Returns:
+    #         float: if option is active at time t, return its value; o.w. return 0
+    #     """
+    #     if not self.inactive[t]:
+    #         return profile_path[t] * self.num_contract * self.contract_size
+    #     else:
+    #         return 0
 
-    def get_value(self, t):
-        """price at time t"""
-        return self._get_profile(t, self.price_path)
+    # def get_value(self, t):
+    #     """price at time t"""
+    #     return self._get_profile(t, self.price_path)
 
-    def get_delta(self, t):
-        """delta at time t"""
-        return self._get_profile(t, self.delta_path)
+    # def get_delta(self, t):
+    #     """delta at time t"""
+    #     return self._get_profile(t, self.delta_path)
 
-    def get_gamma(self, t):
-        """gamma at time t"""
-        return self._get_profile(t, self.gamma_path)
+    # def get_gamma(self, t):
+    #     """gamma at time t"""
+    #     return self._get_profile(t, self.gamma_path)
 
-    def get_vega(self, t):
-        """vega at time t"""
-        return self._get_profile(t, self.vega_path)
-
-
+    # def get_vega(self, t):
+    #     """vega at time t"""
+    #     return self._get_profile(t, self.vega_path)
+    
 class SyntheticOption(Option):
-    """Synthetic Option for Poisson arrival liability portfolio 
+    
+#     """Synthetic Option for Poisson arrival liability portfolio 
         
-        This asset stores portfolio's current step prices, next step prices and risk profiles within its simulation path
+#         This asset stores portfolio's current step prices, next step prices and risk profiles within its simulation path
 
-        Current step prices are the portfolio price with positions at current time step t, including new arrival options at t.
-        Next step prices are the portfolio price at time t+1 with option holdings from current time step t, without new arrival options at t+1.
-        Step P&L considers the portfolio components are not changing from time t to t+1, so we maintain two portfolio prices  
-    """
-    def __init__(self, 
-                 cur_price_path,
-                 next_price_path, 
-                 delta_path, 
-                 gamma_path, 
-                 vega_path, 
-                 inactive, 
-                 num_contract,
-                 contract_size=100):
-        """Constructor
+#         Current step prices are the portfolio price with positions at current time step t, including new arrival options at t.
+#         Next step prices are the portfolio price at time t+1 with option holdings from current time step t, without new arrival options at t+1.
+#         Step P&L considers the portfolio components are not changing from time t to t+1, so we maintain two portfolio prices  
+#     """
+#     def __init__(self, 
+#                  cur_price_path,
+#                  next_price_path, 
+#                  delta_path, 
+#                  gamma_path, 
+#                  vega_path, 
+#                  inactive, 
+#                  num_contract,
+#                  contract_size=100):
+#         """Constructor
         
-        Args:
-            cur_price_path (np.ndarray): option price at time t, portfolio positions includes new arrival options at t. shape (num_episode, num_step).
-            next_price_path (np.ndarray): option price at time t+1, portfolio positions excludes new arrival options at t+1. shape (num_episode, num_step).
-            delta_path (np.ndarray): option delta 
-            gamma_path (np.ndarray): option gamma
-            vega_path (np.ndarray): option vega
-            inactive (np.ndarray): boolean array indicates option active status (True if it is inactive, o.w. False)
-            num_contract (np.ndarray): number of contracts that is purchased (positive value) or sold (negative value).
-            contract_size (int): one contract corresponds to how many underlying shares. (Default: 100)
-        """
-        super().__init__(cur_price_path, delta_path, gamma_path, vega_path, inactive, num_contract,contract_size)
-        self.next_price_path = next_price_path
+#         Args:
+#             cur_price_path (np.ndarray): option price at time t, portfolio positions includes new arrival options at t. shape (num_episode, num_step).
+#             next_price_path (np.ndarray): option price at time t+1, portfolio positions excludes new arrival options at t+1. shape (num_episode, num_step).
+#             delta_path (np.ndarray): option delta 
+#             gamma_path (np.ndarray): option gamma
+#             vega_path (np.ndarray): option vega
+#             inactive (np.ndarray): boolean array indicates option active status (True if it is inactive, o.w. False)
+#             num_contract (np.ndarray): number of contracts that is purchased (positive value) or sold (negative value).
+#             contract_size (int): one contract corresponds to how many underlying shares. (Default: 100)
+#         """
+#         super().__init__(cur_price_path, delta_path, gamma_path, vega_path, inactive, num_contract,contract_size)
+#         self.next_price_path = next_price_path
         
-    def step(self, t):
-        """Step on time t and generate option P&L
+#     def step(self, t):
+#         """Step on time t and generate option P&L
 
-        Args:
-            t (int): step time t
+#         Args:
+#             t (int): step time t
 
-        Returns:
-            float: option P&L from time t to t+1
-        """
-        reward = 0
-        if not self.inactive[t+1]:
-            cur_option_price = self.price_path[t]
-            next_option_price = self.next_price_path[t]
-            reward = (next_option_price - cur_option_price) * self.num_contract * self.contract_size
+#         Returns:
+#             float: option P&L from time t to t+1
+#         """
+#         reward = 0
+#         if not self.inactive[t+1]:
+#             cur_option_price = self.price_path[t]
+#             next_option_price = self.next_price_path[t]
+#             reward = (next_option_price - cur_option_price) * self.num_contract * self.contract_size
 
-        return reward
-
+#         return reward
+    pass
 
 class Portfolio(AssetInterface):
-    """Hedging option portfolio 
+#     """Hedging option portfolio 
 
-    Hedging portfolio contains a list of ATM options for hedging purpose.
-    At each step of a new episode, agent's hedging action determines number of contracts that is added into this portfolio.
-    Each hedging action incurs a proportional transaction cost.
-    After each episode finishes, this portfolio will be cleared through wiping out all active options in MainPortfolio.
-    """
-    def __init__(self, utils, option_generator, stock_prices, vol):
-        """Constructor
+#     Hedging portfolio contains a list of ATM options for hedging purpose.
+#     At each step of a new episode, agent's hedging action determines number of contracts that is added into this portfolio.
+#     Each hedging action incurs a proportional transaction cost.
+#     After each episode finishes, this portfolio will be cleared through wiping out all active options in MainPortfolio.
+#     """
+#     def __init__(self, utils, option_generator, stock_prices, vol):
+#         """Constructor
         
-        Generate hedging options' prices and risk profile by using util function utils.atm_hedges
+#         Generate hedging options' prices and risk profile by using util function utils.atm_hedges
 
-        Args:
-            utils (utils.Utils): environment configurations & util functions
-            stock_prices (np.ndarray): simulated stock prices in shape (num_episodes, num_steps).
-            vol (np.ndarray): simulated volatilities. it is either a constant vol for BSM model, 
-                              or an (num_episodes, num_steps) array for SABR model
-        """
-        super().__init__()
-        self.options = option_generator(stock_prices, vol)
-        self.active_options = []
-        self.utils = utils
+#         Args:
+#             utils (utils.Utils): environment configurations & util functions
+#             stock_prices (np.ndarray): simulated stock prices in shape (num_episodes, num_steps).
+#             vol (np.ndarray): simulated volatilities. it is either a constant vol for BSM model, 
+#                               or an (num_episodes, num_steps) array for SABR model
+#         """
+#         super().__init__()
+#         self.options = option_generator(stock_prices, vol)
+#         self.active_options = []
+#         self.utils = utils
 
-    def reset(self):
-        """Reset portfolio by clearing the active options.
-        """
-        self.active_options = []
+#     def reset(self):
+#         """Reset portfolio by clearing the active options.
+#         """
+#         self.active_options = []
 
-    def step(self, t):
-        """Step on time t and generate hedging option portfolio P&L
+#     def step(self, t):
+#         """Step on time t and generate hedging option portfolio P&L
 
-        Aggregate each option's P&L from time t to t+1, which are currently in the hedging portfolio. 
+#         Aggregate each option's P&L from time t to t+1, which are currently in the hedging portfolio. 
 
-        Args:
-            t (int): time step t
+#         Args:
+#             t (int): time step t
 
-        Returns:
-            float: hedging portfolio P&L
-        """
-        reward = 0
-        for option in self.active_options:
-            reward += option.step(t)
-        if len(self.active_options) > 0 and self.active_options[0].inactive[t]:
-            del self.active_options[0]
-        return reward
+#         Returns:
+#             float: hedging portfolio P&L
+#         """
+#         reward = 0
+#         for option in self.active_options:
+#             reward += option.step(t)
+#         if len(self.active_options) > 0 and self.active_options[0].inactive[t]:
+#             del self.active_options[0]
+#         return reward
 
-    def add(self, sim_episode, t, num_contracts):
-        """add option
-        It is for hedging portfolio, so adding any new option incurs transaction cost 
+#     def add(self, sim_episode, t, num_contracts):
+#         """add option
+#         It is for hedging portfolio, so adding any new option incurs transaction cost 
 
-        Args:
-            sim_episode (int): current simulation episode
-            t (int): current time step
-            num_contracts (float): number of contracts to add
+#         Args:
+#             sim_episode (int): current simulation episode
+#             t (int): current time step
+#             num_contracts (float): number of contracts to add
 
-        Returns:
-            float: transaction cost for adding hedging option (negative value)
-        """
-        opt_to_add = self.options[sim_episode, t]
-        opt_to_add.num_contract = num_contracts
-        self.active_options.append(opt_to_add)
-        return -1 * np.abs(self.utils.spread * opt_to_add.get_value(t))
+#         Returns:
+#             float: transaction cost for adding hedging option (negative value)
+#         """
+#         opt_to_add = self.options[sim_episode, t]
+#         opt_to_add.num_contract = num_contracts
+#         self.active_options.append(opt_to_add)
+#         return -1 * np.abs(self.utils.spread * opt_to_add.get_value(t))
         
-    def get_value(self, t):
-        """portfolio value at time t"""
-        value = 0
-        for option in self.active_options:
-            value += option.get_value(t)
+#     def get_value(self, t):
+#         """portfolio value at time t"""
+#         value = 0
+#         for option in self.active_options:
+#             value += option.get_value(t)
 
-        return value
+#         return value
 
-    def get_delta(self, t):
-        """portfolio delta at time t"""
-        delta = 0
-        for option in self.active_options:
-            delta += option.get_delta(t)
+#     def get_delta(self, t):
+#         """portfolio delta at time t"""
+#         delta = 0
+#         for option in self.active_options:
+#             delta += option.get_delta(t)
 
-        return delta
+#         return delta
 
-    def get_gamma(self, t):
-        """portfolio gamma at time t"""
-        gamma = 0
-        for option in self.active_options:
-            gamma += option.get_gamma(t)
+#     def get_gamma(self, t):
+#         """portfolio gamma at time t"""
+#         gamma = 0
+#         for option in self.active_options:
+#             gamma += option.get_gamma(t)
 
-        return gamma
+#         return gamma
 
-    def get_vega(self, t):
-        """portfolio vega at time t"""
-        vega = 0
-        for option in self.active_options:
-            vega += option.get_vega(t)
+#     def get_vega(self, t):
+        # """portfolio vega at time t"""
+        # vega = 0
+        # for option in self.active_options:
+        #     vega += option.get_vega(t)
 
-        return vega
+        # return vega
+    pass
 
 class Greek(IntEnum):
     PRICE = 0
@@ -424,7 +430,7 @@ class Greek(IntEnum):
 class SwaptionPortfolio(AssetInterface): # TODO: remember to multiply by number of contracts
     def __init__(self, utils, swaption_data):
         super().__init__()
-        self.options = swaption_data#option_generator(swap_prices, vol) # adapt to vectorized version and not have it be a list of options, assume this is now a tensor
+        self.options = np.nan_to_num(swaption_data)#option_generator(swap_prices, vol) # adapt to vectorized version and not have it be a list of options, assume this is now a tensor
         self.active_options = []
         self.utils = utils
         
@@ -470,50 +476,59 @@ class SwaptionPortfolio(AssetInterface): # TODO: remember to multiply by number 
             float: transaction cost for adding hedging option (negative value)
         """
         self.episode = sim_episode
-        opt_to_add = self.options[sim_episode, :,t] # this is a tensor now n_episodes x n_steps x n_swaps x risk_profiles, so entries along diagonal is inceptions
-        opt_to_add *= num_contracts # multiply by number of contracts to scale everything
+        self.options[sim_episode, :,t] *= num_contracts # this is a tensor now n_episodes x n_steps x n_swaps x risk_profiles, so entries along diagonal is inceptions
+        
         # self.active_options.append(opt_to_add) no need to track active options, as all other are just nan or 0 in the tensro
-        return -1 * np.abs(self.utils.spread * opt_to_add[Greek.PRICE]) 
+        return -1 * np.sum(np.abs(self.utils.spread * self.options[sim_episode, t,t, Greek.PRICE]) )
     def get_value(self, t):
         """portfolio value at time t"""
         # keeping this to show the difference between this and the other portfolio
         #value = 0 
         #for option in self.active_options:
         #    value += option.get_value(t)
-        value = np.nansum(self.options[self.episode, t, :, Greek.PRICE]) # sum over all swaptions
+        value = np.sum(self.options[self.episode, t, :, Greek.PRICE]) # sum over all swaptions
         return value
 
     def get_delta(self, t):
-        """portfolio delta at time t"""
+        """total portfolio delta at time t"""
         #delta = 0
         #for option in self.active_options:
         #    delta += option.get_delta(t)
-        delta = self.options[self.episode, t, :, Greek.DELTA]
+        delta = np.sum(self.get_delta_vec(t))
         return delta
+    
+    def get_delta_vec(self, t):
+        """Full delta vector of portfolio at time t"""
+        delta_vec = self.options[self.episode, t, :, Greek.DELTA]
+        return delta_vec
     
     def get_gamma(self, t):
         """portfolio gamma at time t"""
         #gamma = 0
         #for option in self.active_options:
         #    gamma += option.get_gamma(t)
-        gamma = np.nansum(self.options[self.episode, t, :, Greek.GAMMA])
+        gamma = np.nansum(self.get_gamma_vec(t)) # sum over all swaptions
         return gamma
-    
+    def get_gamma_vec(self, t):
+        """portfolio gamma vector at time t"""
+        gamma_vec = self.options[self.episode, t, :, Greek.GAMMA]
+        return gamma_vec
     def get_vega(self, t):
         """portfolio vega at time t"""
         #vega = 0
         #for option in self.active_options:
         #    vega += option.get_vega(t)
-        vega = np.nansum(self.options[self.episode, t, :, Greek.VEGA])
+        vega = np.nansum(self.get_vega_vec(t)) # sum over all swaptions
         return vega
 
-    def get_delta_individual(self, t) -> np.ndarray:
-        """portfolio individual deltas at time t. Used to adjust the underlying position"""
-      
-        delta_arr = self.options[self.episode, t, :, Greek.DELTA]
-        return delta_arr
+    def get_vega_vec(self, t):
+        """portfolio vega vector at time t"""
+        vega_vec = self.options[self.episode, t, :, Greek.VEGA]
+        return vega_vec
 
-# class LiabilityPortfolio(Portfolio):
+
+
+class LiabilityPortfolio(Portfolio):
 #     """Poisson arrival liability portfolio
 
 #     Liability portfolio price and risk profiles are aggregated after the initial simulation 
@@ -553,6 +568,8 @@ class SwaptionPortfolio(AssetInterface): # TODO: remember to multiply by number 
 #             opt_to_add = self.options[sim_episode]
 #             opt_to_add.num_contract = num_contracts
 #             self.active_options = [opt_to_add]
+    pass
+
 class SwaptionLiabilityPortfolio(SwaptionPortfolio):
     """Poisson arrival liability portfolio using vectorized swaption tensor."""
 
@@ -604,7 +621,21 @@ class MainPortfolio(AssetInterface):
         #self.underlying = Stock(self.a_price)
         self.underlying = Swaps(hedge_swap, liab_swap)  # WE USING SWAPS INSTEAD
         self.sim_episode = -1
-    
+        self.lam = 1.0
+
+    def exponential_kernel(self, center_idx, vector_len, lam=1.0):
+        """Generate an exponential decay kernel centered at `center_idx`."""
+        indices = np.arange(vector_len)
+        distances = np.abs(indices - center_idx)
+        weights = np.exp(-lam * distances)
+        return weights
+
+    def compute_local_sensitivity(self, vec, t):
+        """Compute the kernel-weighted local delta around a hedgeable point."""
+        kernel = self.exponential_kernel(center_idx=t, vector_len=len(vec), lam=self.lam)
+        #print(kernel)
+        return np.dot(kernel, vec)
+
     def get_value(self, t):
         """portfolio value at time t"""
         return self.hed_port.get_value(t) + self.liab_port.get_value(t) + self.underlying.get_value(t)
@@ -612,27 +643,60 @@ class MainPortfolio(AssetInterface):
     # def get_delta(self, t):
     #     """portfolio delta at time t"""
     #     return self.hed_port.get_delta(t) + self.liab_port.get_delta(t) + self.underlying.get_delta(t)
+    def get_delta_vec(self, t):
+        """portfolio delta vector at time t"""
+        swap_delta =  self.underlying.get_delta_vec(t)
+        swaption_delta = np.concatenate([self.hed_port.get_delta_vec(t), self.liab_port.get_delta_vec(t)])
+        delta_concat =  swaption_delta+swap_delta
+        return delta_concat
+    
     def get_delta(self, t):
         """portfolio delta at time t"""
-        delta_concat = np.concatenate([self.hed_port.get_delta(t), self.liab_port.get_delta(t)]) + self.underlying.get_delta(t)
-        return delta_concat
+        delta = np.sum(self.get_delta_vec(t))
+        return delta
+    
+    def get_delta_local_hed(self, t):
+        """portfolio delta at time t"""
+        return self.compute_local_sensitivity(self.get_delta_vec(t), t)
+    
+    def get_delta_local_liab(self, t):
+        """portfolio delta at time t"""
+        return self.compute_local_sensitivity(self.liab_port.get_delta_vec(t), t)
     
     def get_gamma(self, t):
         """portfolio gamma at time t"""
         return self.hed_port.get_gamma(t) + self.liab_port.get_gamma(t)
     
+    def get_gamma_vec(self, t):
+        """portfolio gamma vector at time t"""
+        swaption_gamma = np.concatenate([self.hed_port.get_gamma_vec(t), self.liab_port.get_gamma_vec(t)])
+        return swaption_gamma
+    
+    def get_gamma_local(self, t):
+        """portfolio gamma at time t"""
+        return self.compute_local_sensitivity(self.get_gamma_vec(t), t)
+    
     def get_vega(self, t):
         """portfolio vega at time t"""
         return self.hed_port.get_vega(t) + self.liab_port.get_vega(t)
+    
+    def get_vega_vec(self, t):
+        """portfolio vega vector at time t"""
+        swaption_vega = np.concatenate([self.hed_port.get_vega_vec(t), self.liab_port.get_vega_vec(t)])
+        return swaption_vega
+    
+    def get_vega_local(self, t):
+        """portfolio vega at time t"""
+        return self.compute_local_sensitivity(self.get_vega_vec(t), t)
 
     # def get_state(self, t):
     #     """Environment States at time t
         
     #     1. Underlying price
     #     2. Total portfolio gamma
-    #     3. heding option's gamma
+    #     3. hedging option's gamma
     #     4. Total portfolio vega
-    #     5. heding option's vega
+    #     5. hedging option's vega
     #     """
     #     price = self.underlying.active_path[t]
     #     gamma = self.get_gamma(t)
@@ -646,30 +710,37 @@ class MainPortfolio(AssetInterface):
 
 
     def get_state(self, t):
-        price = self.underlying.active_path[t]
 
-        gamma = self.get_gamma(t)
-        hed_gamma = self.hed_port.options[self.sim_episode, t, t, Greek.GAMMA] * self.utils.contract_size
+        price_hed, price_liab = self.underlying.get_value(t) 
 
-        state = [price, gamma, hed_gamma]
+        # total portfolio gamma
+        gamma = self.get_gamma(t) 
+        gamma_local = self.get_gamma_local(t) 
+        hed_gamma = self.hed_port.options[self.sim_episode, t, t, Greek.GAMMA] 
+
+
+        # for information to determine swap position size
+        delta = self.get_delta(t) 
+        delta_local_hed = self.get_delta_local_hed(t) 
+        delta_local_liab = self.get_delta_local_liab(t) 
+
+        # swaption delta
+        hed_delta = self.hed_port.options[self.sim_episode, t, t, Greek.DELTA] 
+        liab_delta = self.liab_port.options[self.sim_episode, t, t, Greek.DELTA] 
+        
+        state = [price_hed, price_liab, delta, delta_local_hed, delta_local_liab, hed_delta,liab_delta,
+                gamma, gamma_local, hed_gamma]
 
         if FLAGS.vega_obs:
-            vega = self.get_vega(t)
-            hed_vega = self.hed_port.options[self.sim_episode, t, t, Greek.VEGA] * self.utils.contract_size
-            state.extend([vega, hed_vega])
+            vega = self.get_vega(t) 
+            vega_local = self.get_vega_local(t) 
+            hed_vega = self.hed_port.options[self.sim_episode, t, t, Greek.VEGA] 
+            state.extend([vega,vega_local, hed_vega])
 
-        # Add delta vecs
-        total_delta = self.get_delta(t)
-        state.append(total_delta)
 
-        # Add delta vector (e.g., across swaps like 1y4y, 2y4y, etc.)
-        delta_vec = self.get_delta(t)
-
-        # Fill nans with 0s or mask depending on how you train
-        delta_vec = np.nan_to_num(delta_vec)
-
-        state.extend(delta_vec.tolist())
-
+        state.append(t)
+        # price_hed, price_liab, delta, delta_local_hed, delta_local_liab, hed_delta,liab_delta, 
+        # gamma, gamma_local, hed_gamma, vega, vega_local, hed_vega, t
         return np.array(state, dtype=np.float32)
 
 
@@ -683,9 +754,11 @@ class MainPortfolio(AssetInterface):
         self.hed_port.active_options = []
         self.liab_port.active_options = []
         self.underlying.set_path(sim_episode)
+        self.liab_port.episode = sim_episode
+        self.hed_port.episode = sim_episode 
         self.sim_episode = sim_episode
 
-    def step(self, action, t,  result):
+    def step(self, action_swaption_hed, action_swap_hed,action_swap_liab, t,  result):
         """Step on time t and generate reward
 
         Args:
@@ -698,9 +771,9 @@ class MainPortfolio(AssetInterface):
         """
         #result.stock_price = self.a_price[self.sim_episode, t]
         result.stock_price = self.underlying.get_value(t)
-        result.hed_cost = reward = self.hed_port.add(self.sim_episode, t, action)
+        result.hed_cost = reward = self.hed_port.add(self.sim_episode, t, action_swaption_hed)
         # result.stock_position = self.underlying.position = -1 * (self.hed_port.get_delta(t) + self.liab_port.get_delta(t))
-        result.swap_position = self.underlying.set_position(t, action) # TODO: the RL agent should set the position of the underlying swap
+        result.swap_position = self.underlying.set_position(t, action_swap_hed, action_swap_liab) # TODO: the RL agent should set the position of the underlying swap
         #result.stock_position = self.underlying.position = -1 * (self.hed_port.get_delta_individual(t) + self.liab_port.get_delta(t))
         result.liab_port_gamma = self.liab_port.get_gamma(t)
         result.liab_port_vega = self.liab_port.get_vega(t)
@@ -710,5 +783,5 @@ class MainPortfolio(AssetInterface):
         result.hed_port_pnl = self.hed_port.step(t)
         result.stock_pnl = self.underlying.step(t)
         reward += (result.liab_port_pnl + result.hed_port_pnl + result.stock_pnl)
-
+        print("reward", reward)
         return reward

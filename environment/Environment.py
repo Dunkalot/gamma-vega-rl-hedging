@@ -63,10 +63,10 @@ class TradingEnv(gym.Env):
         self.utils = utils
 
         # other attributes
-        self.num_path = self.portfolio.a_price.shape[0]
-
+        #self.num_path = self.portfolio.a_price.shape[0]
+        self.num_path = self.portfolio.hed_port.options.shape[0]
         # set num_period: initial time to maturity * daily trading freq + 1 (see get_sim_path() in utils.py)
-        self.num_period = self.portfolio.a_price.shape[1]
+        self.num_period = self.portfolio.hed_port.options.shape[1]
 
         self.sim_episode = -1
 
@@ -74,32 +74,68 @@ class TradingEnv(gym.Env):
         self.t = None
 
         # time to maturity array
-        self.ttm_array = np.arange(self.utils.init_ttm, -self.utils.frq, -self.utils.frq)
-        # TODO: implement action and observation space to include delta vectors
+        #self.ttm_array = np.arange(self.utils.init_ttm, -self.utils.frq, -self.utils.frq)
+        # self.ttm_array = utils.ttm_mat TODO: check if this is used anywhere
         # Action space: HIGH value has to be adjusted with respect to the option used for hedging
-        self.action_space = spaces.Box(low=np.array([0]), 
-                                       high=np.array([1.0]), dtype=np.float32)
+        # self.action_space = spaces.Box(low=np.array([0]), 
+        #                                high=np.array([1.0]), dtype=np.float32)
+        self.action_space = spaces.Box( # swaption hedge, 1y swap hedge, 2y swap hedge
+            low=np.zeros(3, dtype=np.float32),
+            high=np.ones(3, dtype=np.float32),
+            dtype=np.float32
+        )
 
         # Observation space
         max_gamma = self.portfolio.liab_port.max_gamma
         max_vega = self.portfolio.liab_port.max_vega
-        obs_lowbound = np.array([self.portfolio.a_price.min(), 
-                                 -1 * max_gamma * self.utils.contract_size, 
+        # minimum price per expiry across all episodes
+        min_price_swap_hed = np.min(self.portfolio.underlying.swap_data_hed)
+        min_price_swap_liab = np.min(self.portfolio.underlying.swap_data_liab)
+        max_price_swap_hed = np.max(self.portfolio.underlying.swap_data_hed)
+        max_price_swap_liab = np.max(self.portfolio.underlying.swap_data_liab)
+
+        obs_lowbound = np.array([ min_price_swap_hed,
+                                    min_price_swap_liab,
+                                    -np.inf, 
+                                    -np.inf, 
+                                    -np.inf, 
+                                    -np.inf,
+                                    -np.inf,
+                                 -1 * max_gamma , 
+                                 -np.inf,
                                  -np.inf])
-        obs_highbound = np.array([self.portfolio.a_price.max(), 
-                                  max_gamma * self.utils.contract_size,
+        obs_highbound = np.array([      
+                                    max_price_swap_hed,  
+                                    max_price_swap_liab,                               
+                                    np.inf, 
+                                    np.inf, 
+                                    np.inf, 
+                                    np.inf,
+                                    np.inf,
+                                  max_gamma ,
+                                    np.inf,
                                   np.inf])
+        # concat prices  and gamma
+
         if FLAGS.vega_obs:
-            obs_lowbound = np.concatenate([obs_lowbound, [-1 * max_vega * self.utils.contract_size,
+            obs_lowbound = np.concatenate([obs_lowbound, [-1 * max_vega ,
+                                                          -np.inf,
                                                           -np.inf]])
-            obs_highbound = np.concatenate([obs_highbound, [max_vega * self.utils.contract_size,
+            obs_highbound = np.concatenate([obs_highbound, [max_vega,
+                                                            np.inf,
                                                             np.inf]])
+        obs_highbound = np.concatenate([obs_highbound, [utils.num_period]]) # t
+        obs_lowbound = np.concatenate([obs_lowbound, [0]]) # t   
         self.observation_space = spaces.Box(low=obs_lowbound,high=obs_highbound, dtype=np.float32)
-            
+        
         # Initializing the state values
-        self.num_state = 5 if FLAGS.vega_obs else 3
+        #self.num_state = 5 if FLAGS.vega_obs else 3
+        # modified to include time, delta sum, and delta vector
+        self.num_state = len(obs_highbound)
         self.state = []
 
+
+        # was commented out in the original code
         # self.reset()
 
     def seed(self, seed):
@@ -128,7 +164,7 @@ class TradingEnv(gym.Env):
         result = StepResult(
             episode=self.sim_episode,
             t=self.t,
-            hed_action=action[0],
+            hed_action=action,
         )
         # action constraints
         # gamma_action_bound = -self.portfolio.get_gamma(self.t)/self.portfolio.hed_port.options[self.sim_episode, self.t].gamma_path[self.t]/self.utils.contract_size
@@ -148,51 +184,78 @@ class TradingEnv(gym.Env):
         t = self.t
         ep = self.sim_episode
         hed_option = self.portfolio.hed_port.options
-
-        contract_size = self.utils.contract_size
+        liab_option = self.portfolio.liab_port.options  
+        #contract_size = self.utils.contract_size
 
         # === Gamma hedge ===
-        gamma_hedge_unit = hed_option[ep, t, t, Greek.GAMMA]  # gamma per contract
-        portfolio_gamma = self.portfolio.get_gamma(t)
+        gamma_hedge_unit = hed_option[ep, t, t, Greek.GAMMA]  # gamma for swaption to be traded
+        portfolio_gamma = self.portfolio.get_gamma_local(t)
 
-        gamma_action_bound = -portfolio_gamma / (gamma_hedge_unit / contract_size)
+        gamma_action_bound = -portfolio_gamma / (gamma_hedge_unit)
         action_low = [0]
         action_high = [gamma_action_bound]
 
         # === Vega hedge ===
         if FLAGS.vega_obs:
-            vega_hedge_unit = hed_option[ep, t, t, Greek.VEGA]  # vega per contract
-            portfolio_vega = self.portfolio.get_vega(t)
+            vega_hedge_unit = hed_option[ep, t, t, Greek.VEGA]  # vega for swaption to be traded
+            portfolio_vega = self.portfolio.get_vega_local(t) 
 
-            vega_action_bound = -portfolio_vega / (vega_hedge_unit / contract_size)
-            action_low.append(vega_action_bound)
+            vega_action_bound = -portfolio_vega / (vega_hedge_unit)
+            action_low.append(0)
             action_high.append(vega_action_bound)
 
         # === Delta hedge ===
-        # NOTE: You’re currently using GAMMA here again. You probably meant to index DELTA.
-        delta_hedge_unit = hed_option[ep, t, t, Greek.DELTA]  # FIXED to DELTA
-        portfolio_delta = self.portfolio.get_delta(t)
+        delta_hedge_unit = hed_option[ep, t, t, Greek.DELTA]  
+        delta_liab_unit = liab_option[ep, t, t, Greek.DELTA]
+        
 
-        delta_action_bound = -portfolio_delta / (delta_hedge_unit / contract_size)
+        #portfolio_delta = self.portfolio.get_delta(t) # array of deltas for all options in the portfolio
 
-        # If you want to use delta in the same normalized way, add it here:
-        action_low.append(delta_action_bound)
-        action_high.append(delta_action_bound)
+        
+
+
 
         # === Hedge scaling from normalized action ===
         low_val = np.min(action_low)
         high_val = np.max(action_high)
 
-        hed_share = low_val + action[0] * (high_val - low_val)
+        action_swaption_hedge = low_val + action[0] * (high_val - low_val)
 
-        result.hed_share = hed_share
+        result.hed_share = action_swaption_hedge
+        
 
 
+
+        # action[1] bound
+        # delta that is added by the hedging swaption
+        delta_swaption_offset_hed =  delta_hedge_unit * action_swaption_hedge 
+        # effect of the hedging swaption 
+        delta_hed_local = self.portfolio.get_delta_local_hed(t)
+        delta_hed_total = delta_hed_local + delta_swaption_offset_hed
+        
+        delta_hed_min = 0
+        action_swap_hedge = delta_hed_min + action[1] * (delta_hed_total - delta_hed_min)
+
+        # action[2] bound
+        delta_swaption_offset_liab = delta_liab_unit
+        delta_liab_local = self.portfolio.get_delta_local_liab(t)
+        delta_liab_total = delta_liab_local + delta_swaption_offset_liab # local delta + delta from liab
+        delta_liab_min = 0
+        action_swap_liab = delta_liab_min + action[2] * (delta_liab_total - delta_liab_min)
+
+
+        
+        
         # current prices at t
         result.gamma_before_hedge = self.portfolio.get_gamma(self.t)
         result.vega_before_hedge = self.portfolio.get_vega(self.t)
 
-        result.step_pnl = reward = self.portfolio.step(hed_share, self.t, result)
+        result.step_pnl = reward = self.portfolio.step(action_swaption_hed=action_swaption_hedge,
+                                                        action_swap_hed=action_swap_hedge,
+                                                        action_swap_liab=action_swap_liab, 
+                                                        t=self.t, 
+                                                        result=result)
+        
         result.gamma_after_hedge = self.portfolio.get_gamma(self.t)
         result.vega_after_hedge = self.portfolio.get_vega(self.t)
         
@@ -201,13 +264,25 @@ class TradingEnv(gym.Env):
         state = self.portfolio.get_state(self.t)
         if self.t == self.num_period - 1:
             done = True
-            state[1:] = 0
+            #state[1:] = 0 this is handled in the tensors. 
         else:
             done = False
         
-        result.state_price, result.state_gamma, result.state_hed_gamma = state[:3]
+        result.state_price_hed = state[0]
+        result.state_price_liab = state[1]
+        result.state_delta = state[2]
+        result.state_delta_local_hed = state[3]
+        result.state_delta_local_liab = state[4]
+        result.state_hed_delta = state[5]
+        result.state_liab_delta = state[6]
+        result.state_gamma = state[7]
+        result.state_gamma_local = state[8]
+        result.state_hed_gamma = state[9]
+
         if FLAGS.vega_obs:
-            result.state_vega, result.state_hed_vega = state[3:]
+            result.state_vega = state[10]
+            result.state_vega_local = state[11]
+            result.state_hed_vega = state[12]
         # TODO: look into this, it might be slowing down the code
         # for other info later
         info = {"path_row": self.sim_episode}

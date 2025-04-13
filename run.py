@@ -17,7 +17,6 @@ import dm_env
 import numpy as np
 import sonnet as snt
 import pandas as pd
-
 from environment.Environment import TradingEnv
 from environment.utils import Utils
 import agent.distributional as ad
@@ -101,14 +100,29 @@ def make_networks(
     vmin: float = -150.,
     vmax: float = 150.,
     num_atoms: int = 51,
+    max_time_steps: int = 100,  # Maximum number of time steps in an episode
+    time_embedding_dim: int = 16,  # Dimension of the time embedding
 ) -> Mapping[str, types.TensorTransformation]:
     """Creates the networks used by the agent."""
 
     # Get total number of action dimensions from action spec.
     num_dimensions = np.prod(action_spec.shape, dtype=int)
 
+
+
+    # Create a time embedding layer.
+    time_embedding_layer = tf.keras.layers.Embedding(input_dim=max_time_steps, output_dim=time_embedding_dim)
+    
+    # Create the shared observation network.
+    def observation_with_time(obs):
+        # Assume the last dimension of the observation is the time step (integer).
+        features, time_step = obs[..., :-1], tf.cast(obs[..., -1], tf.int32)
+        time_embedding = time_embedding_layer(time_step)
+        return tf.concat([features, time_embedding], axis=-1)
+    
+    observation_network = observation_with_time
     # Create the shared observation network; here simply a state-less operation.
-    observation_network = tf2_utils.batch_concat
+    #observation_network = tf2_utils.batch_concat
 
     # Create the policy network.
     policy_network = snt.Sequential([
@@ -233,12 +247,12 @@ def main(argv):
     environment = make_environment(utils=utils)
     environment_spec = specs.make_environment_spec(environment)
     if FLAGS.critic == 'c51':
-        agent_networks = make_networks(action_spec=environment_spec.actions)
+        agent_networks = make_networks(action_spec=environment_spec.actions, max_time_steps=FLAGS.init_ttm)
     elif 'qr' in FLAGS.critic:
-        agent_networks = make_quantile_networks(action_spec=environment_spec.actions)
+        agent_networks = make_quantile_networks(action_spec=environment_spec.actions, max_time_steps=FLAGS.init_ttm)
     elif FLAGS.critic == 'iqn':
         assert FLAGS.obj_func == 'cvar', 'IQN only support CVaR objective.'
-        agent_networks = make_iqn_networks(action_spec=environment_spec.actions,cvar_th=FLAGS.threshold)
+        agent_networks = make_iqn_networks(action_spec=environment_spec.actions,cvar_th=FLAGS.threshold, max_time_steps=FLAGS.init_ttm)
     loggers = make_loggers(work_folder=work_folder)
 
     # Construct the agent.

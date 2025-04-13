@@ -20,13 +20,13 @@ from environment.Trading import Option, SyntheticOption
 from absl import flags
 FLAGS = flags.FLAGS
 import numpy as np
-from ..lmmsabr import LMMSABR
+#from ..lmmsabr import LMMSABR
 random.seed(1)
 
 
 class Utils:
     def __init__(self, init_ttm, np_seed, num_sim, mu=0.0, init_vol=0.2, 
-                 s=10, k=10, r=0, q=0, t=252, frq=1, spread=0,
+                 s=10, k=10, r=0, q=0, t=52, frq=1, spread=0,
                  hed_ttm=60, beta=1, rho=-0.7, volvol=0.6, ds=0.001, 
                  poisson_rate=1, moneyness_mean=1.0, moneyness_std=0.0, ttms=None, 
                  num_conts_to_add = -1, contract_size = 100,
@@ -250,36 +250,42 @@ class Utils:
 
 
     def generate_swaption_market_data(self):
-        lmm = LMMSABR
-        n_episodes = 2
-        # (n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[1], n_metrics)
-        hedge_swaption = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 6))
-        liab_swaption = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 6))
-        hedge_swap = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 2))
-        liab_swap = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 2))
-        # loop that assigns to the arrays
-        for i in tqdm(range(n_episodes)):
-            lmm.simulate(seed=i)
-            lmm.get_swap_matrix()
-            res = lmm.get_sabr_params()
-            hedge_swaption[i], hedge_swap[i] = res[0]
-            liab_swaption[i], liab_swap[i] = res[1]
+        pass # TODO: UNCOMMENT WHEN READY
+        # lmm = LMMSABR
+        # n_episodes = 2
+        # # (n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[1], n_metrics)
+        # hedge_swaption = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 6))
+        # liab_swaption = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 6))
+        # hedge_swap = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 2))
+        # liab_swap = np.zeros((n_episodes, lmm.swap_sim_shape[0], lmm.swap_sim_shape[0], 2))
+        # # loop that assigns to the arrays
+        # for i in tqdm(range(n_episodes)):
+        #     lmm.simulate(seed=i)
+        #     lmm.get_swap_matrix()
+        #     res = lmm.get_sabr_params()
+        #     hedge_swaption[i], hedge_swap[i] = res[0]
+        #     liab_swaption[i], liab_swap[i] = res[1]
         
-        # generate poisson arrival options for the liab_swaption
-        poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(liab_swaption.shape[0], liab_swaption.shape[1], liab_swaption.shape[2]))
-        # Binomial draws: number of +1s per entry
-        num_pos = np.random.binomial(poisson_draws, 0.5)
-        # Net direction: (2 * num_pos - total options)
-        net_direction = 2 * num_pos - poisson_draws
-        # Assign the net direction to the liab_swaption
-        liab_swaption *= net_direction[:, :, :, None]
+        # # generate poisson arrival options for the liab_swaption
+        # poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(liab_swaption.shape[0], liab_swaption.shape[1], liab_swaption.shape[2]))
+        # # Binomial draws: number of +1s per entry
+        # num_pos = np.random.binomial(poisson_draws, 0.5)
+        # # Net direction: (2 * num_pos - total options)
+        # net_direction = 2 * num_pos - poisson_draws
+        # # Assign the net direction to the liab_swaption
+        # liab_swaption *= net_direction[:, :, :, None]
 
         
         
         
-        return hedge_swaption, liab_swaption, hedge_swap, liab_swap
+        #return hedge_swaption, liab_swaption, hedge_swap, liab_swap
+    def init_market_data(self, hedge_swaption, liab_swaption, hedge_swap, liab_swap):
+        self.hedge_swaption = hedge_swaption
+        self.liab_swaption = liab_swaption
+        self.hedge_swap = hedge_swap
+        self.liab_swap = liab_swap
 
-    def init_env(self, lmm = False):
+    def init_env(self, lmm=False):
         """Initialize environment
         Entrypoint to simulate market dynamics: 
         1). stock prices 
@@ -293,321 +299,323 @@ class Utils:
             np.ndarray: implied volatility in shape (num_path, num_period)
         """
         if lmm:
-            return self.generate_swaption_market_data()
+            
+            return self.hedge_swaption, self.liab_swaption, self.hedge_swap, self.liab_swap
+            #return self.generate_swaption_market_data()
         if self.sabr:
             return self.get_sim_path_sabr()
         elif self.gbm:
             return self.get_sim_path()
 
-    def atm_hedges(self, a_prices, vol):
-        """Generate ATM hedging options' prices & risk profiles
+    # def atm_hedges(self, a_prices, vol):
+    #     """Generate ATM hedging options' prices & risk profiles
 
-        Args:
-            a_prices (np.ndarray): simulated underlying asset prices in shape (num_episodes, num_steps)
-            vol (np.ndarray): simulated volatilities. it is either a constant vol for BSM model,
-                              or an (num_episodes, num_steps) array for SABR model
+    #     Args:
+    #         a_prices (np.ndarray): simulated underlying asset prices in shape (num_episodes, num_steps)
+    #         vol (np.ndarray): simulated volatilities. it is either a constant vol for BSM model,
+    #                           or an (num_episodes, num_steps) array for SABR model
 
-        Returns:
-            np.ndarray: a list of Options in shape (num_episodes, num_hedges), 
-                        here num_hedges = num_steps as a new ATM option is initiated at every time step 
-        """
-        print("Generate hedging portfolio option prices and risk profiles")
-        hedge_ttm = self.hed_ttm 
-        num_episode = a_prices.shape[0]
-        num_hedge = num_step = a_prices.shape[1]
-        price = np.empty((num_episode, num_step, num_hedge), dtype=float)
-        delta = np.empty_like(price, dtype=float)
-        gamma = np.empty_like(price, dtype=float)
-        vega = np.empty_like(price, dtype=float)
-        inactive_option = np.empty_like(price, dtype=np.bool8)
+    #     Returns:
+    #         np.ndarray: a list of Options in shape (num_episodes, num_hedges), 
+    #                     here num_hedges = num_steps as a new ATM option is initiated at every time step 
+    #     """
+    #     print("Generate hedging portfolio option prices and risk profiles")
+    #     hedge_ttm = self.hed_ttm 
+    #     num_episode = a_prices.shape[0]
+    #     num_hedge = num_step = a_prices.shape[1]
+    #     price = np.empty((num_episode, num_step, num_hedge), dtype=float)
+    #     delta = np.empty_like(price, dtype=float)
+    #     gamma = np.empty_like(price, dtype=float)
+    #     vega = np.empty_like(price, dtype=float)
+    #     inactive_option = np.empty_like(price, dtype=np.bool8)
 
-        # generate portfolio price & risk profiles for each step 
-        # step dimension is the smallest size for a loop
-        all_option_ttms = None         # all options ttms
-        all_option_strikes = None       # all options strikes
-        for step_i in tqdm(range(num_step)):
-            if all_option_ttms is not None:
-                # decrease ttm of accumulated options
-                all_option_ttms -= 1
-            # new options shape for calculation is (num_episode, )
-            step_a_prices = a_prices[:, step_i]
-            option_ttms = hedge_ttm*np.ones((num_episode,))
-            option_strikes = step_a_prices
-            # add this step's new options
-            if all_option_ttms is not None:
-                all_option_ttms = np.c_[all_option_ttms, option_ttms[:,None]]
-                all_option_strikes = np.c_[all_option_strikes, option_strikes[:,None]]
-            else:
-                all_option_ttms = option_ttms[:,None]
-                all_option_strikes = option_strikes[:,None]
-            # vol
-            if vol.ndim == 0:
-                step_vol = vol
-            else:
-                step_vol = np.tile(np.expand_dims(vol[:, step_i], -1), (1,all_option_ttms.shape[1]))
-            # expand stock price to (num_episode, step_num_opts)
-            step_a_prices = np.tile(np.expand_dims(step_a_prices, -1), (1,all_option_ttms.shape[1]))
-            # bs price and risk profiles
-            step_option_price, step_option_delta, step_option_gamma, step_option_vega = \
-                self.bs_call(step_vol,all_option_ttms,step_a_prices, all_option_strikes,self.r,self.q,self.T)
+    #     # generate portfolio price & risk profiles for each step 
+    #     # step dimension is the smallest size for a loop
+    #     all_option_ttms = None         # all options ttms
+    #     all_option_strikes = None       # all options strikes
+    #     for step_i in tqdm(range(num_step)):
+    #         if all_option_ttms is not None:
+    #             # decrease ttm of accumulated options
+    #             all_option_ttms -= 1
+    #         # new options shape for calculation is (num_episode, )
+    #         step_a_prices = a_prices[:, step_i]
+    #         option_ttms = hedge_ttm*np.ones((num_episode,))
+    #         option_strikes = step_a_prices
+    #         # add this step's new options
+    #         if all_option_ttms is not None:
+    #             all_option_ttms = np.c_[all_option_ttms, option_ttms[:,None]]
+    #             all_option_strikes = np.c_[all_option_strikes, option_strikes[:,None]]
+    #         else:
+    #             all_option_ttms = option_ttms[:,None]
+    #             all_option_strikes = option_strikes[:,None]
+    #         # vol
+    #         if vol.ndim == 0:
+    #             step_vol = vol
+    #         else:
+    #             step_vol = np.tile(np.expand_dims(vol[:, step_i], -1), (1,all_option_ttms.shape[1]))
+    #         # expand stock price to (num_episode, step_num_opts)
+    #         step_a_prices = np.tile(np.expand_dims(step_a_prices, -1), (1,all_option_ttms.shape[1]))
+    #         # bs price and risk profiles
+    #         step_option_price, step_option_delta, step_option_gamma, step_option_vega = \
+    #             self.bs_call(step_vol,all_option_ttms,step_a_prices, all_option_strikes,self.r,self.q,self.T)
             
-            for option_i in range(num_hedge):
-                if (option_i > step_i) or (all_option_ttms[:, option_i].mean() < 0):
-                    # option is not initiated or option expired
-                    inactive_option[:, step_i, option_i] = True
-                    price[:, step_i, option_i] = 0
-                    delta[:, step_i, option_i] = 0
-                    gamma[:, step_i, option_i]  = 0
-                    vega[:, step_i, option_i] = 0
-                else:
-                    # option expired
-                    inactive_option[:, step_i, option_i] = False
-                    price[:, step_i, option_i] = step_option_price[:, option_i]
-                    delta[:, step_i, option_i] = step_option_delta[:, option_i]
-                    gamma[:, step_i, option_i] = step_option_gamma[:, option_i]
-                    vega[:, step_i, option_i] = step_option_vega[:, option_i]
+    #         for option_i in range(num_hedge):
+    #             if (option_i > step_i) or (all_option_ttms[:, option_i].mean() < 0):
+    #                 # option is not initiated or option expired
+    #                 inactive_option[:, step_i, option_i] = True
+    #                 price[:, step_i, option_i] = 0
+    #                 delta[:, step_i, option_i] = 0
+    #                 gamma[:, step_i, option_i]  = 0
+    #                 vega[:, step_i, option_i] = 0
+    #             else:
+    #                 # option expired
+    #                 inactive_option[:, step_i, option_i] = False
+    #                 price[:, step_i, option_i] = step_option_price[:, option_i]
+    #                 delta[:, step_i, option_i] = step_option_delta[:, option_i]
+    #                 gamma[:, step_i, option_i] = step_option_gamma[:, option_i]
+    #                 vega[:, step_i, option_i] = step_option_vega[:, option_i]
 
-        # construct options in shape (num_sim, num_hedge)
-        print("Initialize hedging portfolio options.")
-        options = []
-        for ep_i in tqdm(range(num_episode)):
-            options.append([])
-            for option_i in range(num_hedge):
-                options[-1].append(Option(price[ep_i,:,option_i], delta[ep_i,:,option_i], 
-                                          gamma[ep_i,:,option_i], vega[ep_i,:,option_i], 
-                                          inactive_option[ep_i,:,option_i], 0, self.contract_size))              
-        return np.array(options)
+    #     # construct options in shape (num_sim, num_hedge)
+    #     print("Initialize hedging portfolio options.")
+    #     options = []
+    #     for ep_i in tqdm(range(num_episode)):
+    #         options.append([])
+    #         for option_i in range(num_hedge):
+    #             options[-1].append(Option(price[ep_i,:,option_i], delta[ep_i,:,option_i], 
+    #                                       gamma[ep_i,:,option_i], vega[ep_i,:,option_i], 
+    #                                       inactive_option[ep_i,:,option_i], 0, self.contract_size))              
+    #     return np.array(options)
 
         # =========================================================================
         #                           LMMSABR FUNCTIONS
         # =========================================================================
 
 
-    def convert_tensor_to_option_objects(self, option_tensor_list, liab=False):
-        """
-        Convert precomputed tensor-style option data into a nested list of Option objects.
+    # def convert_tensor_to_option_objects(self, option_tensor_list, liab=False):
+    #     """
+    #     Convert precomputed tensor-style option data into a nested list of Option objects.
 
-        Parameters
-        ----------
-        option_tensor_list : list
-            Outer list is n_episodes long.
-            Each element is a list of option metrics: [price, delta, gamma, vega, inactive]
-            Each metric is a (n_steps, n_options) matrix.
+    #     Parameters
+    #     ----------
+    #     option_tensor_list : list
+    #         Outer list is n_episodes long.
+    #         Each element is a list of option metrics: [price, delta, gamma, vega, inactive]
+    #         Each metric is a (n_steps, n_options) matrix.
 
-        contract_size : int
-            Number of units per contract.
+    #     contract_size : int
+    #         Number of units per contract.
 
-        Returns
-        -------
-        List[List[Option]]
-            Shape: (n_episodes, n_options), each item is an Option object
-        """
-        n_episodes = len(option_tensor_list)
-        options_per_episode = []
-        factor = np.ones(n_episodes)
-        if liab:
-            # Shape: (num_episodes, num_steps)
-            poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(option_tensor_list[0][0].shape))
+    #     Returns
+    #     -------
+    #     List[List[Option]]
+    #         Shape: (n_episodes, n_options), each item is an Option object
+    #     """
+    #     n_episodes = len(option_tensor_list)
+    #     options_per_episode = []
+    #     factor = np.ones(n_episodes)
+    #     if liab:
+    #         # Shape: (num_episodes, num_steps)
+    #         poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(option_tensor_list[0][0].shape))
 
-            # Binomial draws: number of +1s per entry
-            num_pos = np.random.binomial(poisson_draws, 0.5)
+    #         # Binomial draws: number of +1s per entry
+    #         num_pos = np.random.binomial(poisson_draws, 0.5)
 
-            # Net direction: (2 * num_pos - total options)
-            net_direction = 2 * num_pos - poisson_draws
-            factor = net_direction
+    #         # Net direction: (2 * num_pos - total options)
+    #         net_direction = 2 * num_pos - poisson_draws
+    #         factor = net_direction
         
-        for ep in range(n_episodes):
-            price_mat, delta_mat, gamma_mat, vega_mat, inactive_mat = option_tensor_list[ep] * factor[ep]
-            n_steps, n_opts = price_mat.shape
+    #     for ep in range(n_episodes):
+    #         price_mat, delta_mat, gamma_mat, vega_mat, inactive_mat = option_tensor_list[ep] * factor[ep]
+    #         n_steps, n_opts = price_mat.shape
 
-            episode_options = []
-            for opt_idx in range(n_opts):
-                option = Option(
-                    price_path=price_mat[:, opt_idx],
-                    delta_path=delta_mat[:, opt_idx],
-                    gamma_path=gamma_mat[:, opt_idx],
-                    vega_path=vega_mat[:, opt_idx],
-                    inactive=inactive_mat[:, opt_idx],
-                    num_contract=0,  # this will be managed by the RL policy
-                    contract_size=self.contract_size,
-                )
-                episode_options.append(option)
+    #         episode_options = []
+    #         for opt_idx in range(n_opts):
+    #             option = Option(
+    #                 price_path=price_mat[:, opt_idx],
+    #                 delta_path=delta_mat[:, opt_idx],
+    #                 gamma_path=gamma_mat[:, opt_idx],
+    #                 vega_path=vega_mat[:, opt_idx],
+    #                 inactive=inactive_mat[:, opt_idx],
+    #                 num_contract=0,  # this will be managed by the RL policy
+    #                 contract_size=self.contract_size,
+    #             )
+    #             episode_options.append(option)
 
-            options_per_episode.append(episode_options)
+    #         options_per_episode.append(episode_options)
 
-        return options_per_episode
-
-
-    def agg_poisson_dist_vectorized(self, option_tensor_list):
-        """
-        Convert precomputed tensor-style option data into a list of SyntheticOption objects.
-
-        Parameters
-        ----------
-        option_tensor_list : list
-            Outer list is n_episodes long.
-            Each element is a list of option metrics: [price, delta, gamma, vega, inactive]
-            Each metric is a (n_steps, n_options) matrix.
-
-        contract_size : int
-            Number of units per contract.
-
-        Returns
-        -------
-        np.ndarray
-            A list of SyntheticOption objects in shape (n_episodes,), one for each episode.
-        """
-        n_episodes = len(option_tensor_list)
-        synthetic_options = []
-        # Shape: (num_episodes, num_steps)
-        poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(option_tensor_list[0][0].shape))
-
-        # Binomial draws: number of +1s per entry
-        num_pos = np.random.binomial(poisson_draws, 0.5)
-
-        # Net direction: (2 * num_pos - total options)
-        net_direction = 2 * num_pos - poisson_draws
-
-        for ep in range(n_episodes):
-            net_direction_ep = net_direction[ep]
-
-            price_mat, delta_mat, gamma_mat, vega_mat, inactive_mat = option_tensor_list[ep]* net_direction_ep
-            n_steps, n_opts = price_mat.shape
-
-            # Aggregate the metrics across all options for the episode
-            port_price = np.nansum(price_mat, axis=1)   # Sum across options for each time step
-            port_delta = np.nansum(delta_mat, axis=1) 
-            port_gamma = np.nansum(gamma_mat, axis=1) 
-            port_vega = np.nansum(vega_mat, axis=1)  
-            next_port_price = np.zeros_like(port_price)
-            next_port_price[:, 1:] = port_price[:, :-1]
+    #     return options_per_episode
 
 
-            # Create a SyntheticOption object for the episode
-            synthetic_option = SyntheticOption(
-                port_price=port_price,
-                next_port_price=next_port_price,
-                port_delta=port_delta,
-                port_gamma=port_gamma,
-                port_vega=port_vega,
-                inactive=np.zeros_like(port_price, dtype=np.bool8),  # Default inactive state
-                num_contract=self.num_conts_to_add, # Default number of contracts
-                contract_size=self.contract_size,
-            )
-            synthetic_options.append(synthetic_option)
+    # def agg_poisson_dist_vectorized(self, option_tensor_list):
+    #     """
+    #     Convert precomputed tensor-style option data into a list of SyntheticOption objects.
 
-        return np.array(synthetic_options)
+    #     Parameters
+    #     ----------
+    #     option_tensor_list : list
+    #         Outer list is n_episodes long.
+    #         Each element is a list of option metrics: [price, delta, gamma, vega, inactive]
+    #         Each metric is a (n_steps, n_options) matrix.
+
+    #     contract_size : int
+    #         Number of units per contract.
+
+    #     Returns
+    #     -------
+    #     np.ndarray
+    #         A list of SyntheticOption objects in shape (n_episodes,), one for each episode.
+    #     """
+    #     n_episodes = len(option_tensor_list)
+    #     synthetic_options = []
+    #     # Shape: (num_episodes, num_steps)
+    #     poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(option_tensor_list[0][0].shape))
+
+    #     # Binomial draws: number of +1s per entry
+    #     num_pos = np.random.binomial(poisson_draws, 0.5)
+
+    #     # Net direction: (2 * num_pos - total options)
+    #     net_direction = 2 * num_pos - poisson_draws
+
+    #     for ep in range(n_episodes):
+    #         net_direction_ep = net_direction[ep]
+
+    #         price_mat, delta_mat, gamma_mat, vega_mat, inactive_mat = option_tensor_list[ep]* net_direction_ep
+    #         n_steps, n_opts = price_mat.shape
+
+    #         # Aggregate the metrics across all options for the episode
+    #         port_price = np.nansum(price_mat, axis=1)   # Sum across options for each time step
+    #         port_delta = np.nansum(delta_mat, axis=1) 
+    #         port_gamma = np.nansum(gamma_mat, axis=1) 
+    #         port_vega = np.nansum(vega_mat, axis=1)  
+    #         next_port_price = np.zeros_like(port_price)
+    #         next_port_price[:, 1:] = port_price[:, :-1]
+
+
+    #         # Create a SyntheticOption object for the episode
+    #         synthetic_option = SyntheticOption(
+    #             port_price=port_price,
+    #             next_port_price=next_port_price,
+    #             port_delta=port_delta,
+    #             port_gamma=port_gamma,
+    #             port_vega=port_vega,
+    #             inactive=np.zeros_like(port_price, dtype=np.bool8),  # Default inactive state
+    #             num_contract=self.num_conts_to_add, # Default number of contracts
+    #             contract_size=self.contract_size,
+    #         )
+    #         synthetic_options.append(synthetic_option)
+
+    #     return np.array(synthetic_options)
 
 
 
 
-    def agg_poisson_dist(self, a_prices, vol):
-        """Generate Poisson arrival options' prices & risk profiles
+    # def agg_poisson_dist(self, a_prices, vol):
+    #     """Generate Poisson arrival options' prices & risk profiles
         
-        One option is added at initial day (time step 0)
-        Generate liability options and aggregate their prices and risk profiles 
-        to represent liability portfolio price and risk profiles
+    #     One option is added at initial day (time step 0)
+    #     Generate liability options and aggregate their prices and risk profiles 
+    #     to represent liability portfolio price and risk profiles
 
-        Args:
-            a_prices (np.ndarray): simulated underlying asset prices in shape (num_episodes, num_steps)
-            vol (np.ndarray): simulated volatilities. it is either a constant vol for BSM model,
-                              or an (num_episodes, num_steps) array for SABR model
+    #     Args:
+    #         a_prices (np.ndarray): simulated underlying asset prices in shape (num_episodes, num_steps)
+    #         vol (np.ndarray): simulated volatilities. it is either a constant vol for BSM model,
+    #                           or an (num_episodes, num_steps) array for SABR model
 
-        Returns:
-            np.ndarray: a list of synthetic Options in shape (num_episodes,), one for each episode.  
-        """
-        print("Genrate Poisson arrival portfolio option prices and risk profiles")
-        options = []
-        num_opts_per_day = np.random.poisson(self.poisson_rate, a_prices.shape)
-        print("Poisson arrival options per day: ", num_opts_per_day)
-        num_episode = a_prices.shape[0]
-        num_step = a_prices.shape[1]
-        max_num_opts = num_opts_per_day.max(axis=0) # maximum number of options for each time step
+    #     Returns:
+    #         np.ndarray: a list of synthetic Options in shape (num_episodes,), one for each episode.  
+    #     """
+    #     print("Genrate Poisson arrival portfolio option prices and risk profiles")
+    #     options = []
+    #     num_opts_per_day = np.random.poisson(self.poisson_rate, a_prices.shape)
+    #     print("Poisson arrival options per day: ", num_opts_per_day)
+    #     num_episode = a_prices.shape[0]
+    #     num_step = a_prices.shape[1]
+    #     max_num_opts = num_opts_per_day.max(axis=0) # maximum number of options for each time step
 
-        # generate portfolio price & risk profiles for each step 
-        # step dimension is the smallest size for a loop
-        all_option_ttms = None         # all options ttms
-        all_option_strikes = None       # all options strikes
-        all_option_buysell = None       # all options buy/sell position
-        port_price = next_port_price = port_delta = port_gamma = port_vega = None
-        for step_i in tqdm(range(num_step)):
-            if all_option_ttms is not None:
-                # decrease ttm of accumulated options
-                all_option_ttms -= 1
-            # options shape for calculation is (num_episode, max_num_opts at step_i)
-            if step_i == 0:
-                ep_num_opts = np.ones(num_episode)
-                step_num_opts = 1
-            else:
-                ep_num_opts = num_opts_per_day[:, step_i]
-                step_num_opts = max_num_opts[step_i]
-            step_a_prices = a_prices[:, step_i]
-            # randomize option time to maturities by selecting from self.ttms
-            option_ttms = np.random.choice(self.ttms, (num_episode, step_num_opts))
-            # flush non-existing option's ttm to -1, 
-            # so option's price and risk profile will be calculated as 0 from bs_call
-            option_ttms[ep_num_opts[:,None]<=np.arange(option_ttms.shape[1])] = -1
-            # randomize option strikes
-            moneyness = np.random.normal(self.moneyness_mean, self.moneyness_std, (num_episode, step_num_opts))
-            option_strikes = step_a_prices[:,None]*moneyness # ATM
-            # randomize buy or sell equal likely
-            if step_i == 0:
-                # step 0 - always underwrite one option
-                option_buysell = np.ones((num_episode, step_num_opts), dtype=a_prices.dtype)
-            else:
-                option_buysell = np.random.choice([-1.0,1.0], (num_episode, step_num_opts))
-            # add this step's new options
-            if all_option_ttms is not None:
-                all_option_ttms = np.c_[all_option_ttms, option_ttms]
-                all_option_strikes = np.c_[all_option_strikes, option_strikes]
-                all_option_buysell = np.c_[all_option_buysell, option_buysell]
-            else:
-                all_option_ttms = option_ttms
-                all_option_strikes = option_strikes
-                all_option_buysell = option_buysell
-            # vol
-            if vol.ndim == 0:
-                step_vol = vol
-            else:
-                step_vol = np.tile(np.expand_dims(vol[:, step_i], -1), (1,all_option_ttms.shape[1]))
-            # expand stock price to (num_episode, step_num_opts)
-            step_a_prices = np.tile(np.expand_dims(step_a_prices, -1), (1,all_option_ttms.shape[1]))
-            # bs price and risk profiles
-            step_port_price, step_port_delta, step_port_gamma, step_port_vega = \
-                self.bs_call(step_vol,all_option_ttms,step_a_prices, all_option_strikes,self.r,self.q,self.T)
-            step_port_price *= all_option_buysell
-            step_port_delta *= all_option_buysell
-            step_port_gamma *= all_option_buysell
-            step_port_vega *= all_option_buysell
-            if step_i > 0:
-                if step_num_opts > 0:
-                    step_next_port_price = step_port_price[:,:(-step_num_opts)].sum(axis=1) # only consider the positions from last step
-                else:
-                    step_next_port_price = step_port_price.sum(axis=1)
-            step_port_price = step_port_price.sum(axis=1)
-            step_port_delta = step_port_delta.sum(axis=1)
-            step_port_gamma = step_port_gamma.sum(axis=1)
-            step_port_vega = step_port_vega.sum(axis=1)
-            if step_i > 0:
-                if step_i > 1:
-                    # greater than step 2, concatenate 
-                    next_port_price = np.c_[next_port_price, step_next_port_price[:, None]]
-                else:
-                    # at step 2, initialize next port price
-                    next_port_price = step_next_port_price[:, None]
-                port_price = np.c_[port_price, step_port_price[:, None]]
-                port_delta = np.c_[port_delta, step_port_delta[:, None]]
-                port_gamma = np.c_[port_gamma, step_port_gamma[:, None]]
-                port_vega = np.c_[port_vega, step_port_vega[:, None]]
-            else:
-                port_price = step_port_price[:, None]
-                port_delta = step_port_delta[:, None]
-                port_gamma = step_port_gamma[:, None]
-                port_vega = step_port_vega[:, None]
+    #     # generate portfolio price & risk profiles for each step 
+    #     # step dimension is the smallest size for a loop
+    #     all_option_ttms = None         # all options ttms
+    #     all_option_strikes = None       # all options strikes
+    #     all_option_buysell = None       # all options buy/sell position
+    #     port_price = next_port_price = port_delta = port_gamma = port_vega = None
+    #     for step_i in tqdm(range(num_step)):
+    #         if all_option_ttms is not None:
+    #             # decrease ttm of accumulated options
+    #             all_option_ttms -= 1
+    #         # options shape for calculation is (num_episode, max_num_opts at step_i)
+    #         if step_i == 0:
+    #             ep_num_opts = np.ones(num_episode)
+    #             step_num_opts = 1
+    #         else:
+    #             ep_num_opts = num_opts_per_day[:, step_i]
+    #             step_num_opts = max_num_opts[step_i]
+    #         step_a_prices = a_prices[:, step_i]
+    #         # randomize option time to maturities by selecting from self.ttms
+    #         option_ttms = np.random.choice(self.ttms, (num_episode, step_num_opts))
+    #         # flush non-existing option's ttm to -1, 
+    #         # so option's price and risk profile will be calculated as 0 from bs_call
+    #         option_ttms[ep_num_opts[:,None]<=np.arange(option_ttms.shape[1])] = -1
+    #         # randomize option strikes
+    #         moneyness = np.random.normal(self.moneyness_mean, self.moneyness_std, (num_episode, step_num_opts))
+    #         option_strikes = step_a_prices[:,None]*moneyness # ATM
+    #         # randomize buy or sell equal likely
+    #         if step_i == 0:
+    #             # step 0 - always underwrite one option
+    #             option_buysell = np.ones((num_episode, step_num_opts), dtype=a_prices.dtype)
+    #         else:
+    #             option_buysell = np.random.choice([-1.0,1.0], (num_episode, step_num_opts))
+    #         # add this step's new options
+    #         if all_option_ttms is not None:
+    #             all_option_ttms = np.c_[all_option_ttms, option_ttms]
+    #             all_option_strikes = np.c_[all_option_strikes, option_strikes]
+    #             all_option_buysell = np.c_[all_option_buysell, option_buysell]
+    #         else:
+    #             all_option_ttms = option_ttms
+    #             all_option_strikes = option_strikes
+    #             all_option_buysell = option_buysell
+    #         # vol
+    #         if vol.ndim == 0:
+    #             step_vol = vol
+    #         else:
+    #             step_vol = np.tile(np.expand_dims(vol[:, step_i], -1), (1,all_option_ttms.shape[1]))
+    #         # expand stock price to (num_episode, step_num_opts)
+    #         step_a_prices = np.tile(np.expand_dims(step_a_prices, -1), (1,all_option_ttms.shape[1]))
+    #         # bs price and risk profiles
+    #         step_port_price, step_port_delta, step_port_gamma, step_port_vega = \
+    #             self.bs_call(step_vol,all_option_ttms,step_a_prices, all_option_strikes,self.r,self.q,self.T)
+    #         step_port_price *= all_option_buysell
+    #         step_port_delta *= all_option_buysell
+    #         step_port_gamma *= all_option_buysell
+    #         step_port_vega *= all_option_buysell
+    #         if step_i > 0:
+    #             if step_num_opts > 0:
+    #                 step_next_port_price = step_port_price[:,:(-step_num_opts)].sum(axis=1) # only consider the positions from last step
+    #             else:
+    #                 step_next_port_price = step_port_price.sum(axis=1)
+    #         step_port_price = step_port_price.sum(axis=1)
+    #         step_port_delta = step_port_delta.sum(axis=1)
+    #         step_port_gamma = step_port_gamma.sum(axis=1)
+    #         step_port_vega = step_port_vega.sum(axis=1)
+    #         if step_i > 0:
+    #             if step_i > 1:
+    #                 # greater than step 2, concatenate 
+    #                 next_port_price = np.c_[next_port_price, step_next_port_price[:, None]]
+    #             else:
+    #                 # at step 2, initialize next port price
+    #                 next_port_price = step_next_port_price[:, None]
+    #             port_price = np.c_[port_price, step_port_price[:, None]]
+    #             port_delta = np.c_[port_delta, step_port_delta[:, None]]
+    #             port_gamma = np.c_[port_gamma, step_port_gamma[:, None]]
+    #             port_vega = np.c_[port_vega, step_port_vega[:, None]]
+    #         else:
+    #             port_price = step_port_price[:, None]
+    #             port_delta = step_port_delta[:, None]
+    #             port_gamma = step_port_gamma[:, None]
+    #             port_vega = step_port_vega[:, None]
         
-        print("Initialize Poisson arrival liability portfolio options.")
-        for ep_i in tqdm(range(num_episode)):
-            options.append(
-                SyntheticOption(port_price[ep_i,:], next_port_price[ep_i,:], port_delta[ep_i,:], port_gamma[ep_i,:], port_vega[ep_i,:], 
-                                np.zeros((num_step,)).astype(np.bool8), self.num_conts_to_add, self.contract_size))
-        return np.array(options)
+    #     print("Initialize Poisson arrival liability portfolio options.")
+    #     for ep_i in tqdm(range(num_episode)):
+    #         options.append(
+    #             SyntheticOption(port_price[ep_i,:], next_port_price[ep_i,:], port_delta[ep_i,:], port_gamma[ep_i,:], port_vega[ep_i,:], 
+    #                             np.zeros((num_step,)).astype(np.bool8), self.num_conts_to_add, self.contract_size))
+    #     return np.array(options)
