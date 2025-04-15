@@ -998,7 +998,7 @@ def create_df_inits_from_samples(tau=0.5, resolution=2, n_samples=100):
 
 
 
-def sample_positive_rebonato_params(n_samples=1,max_allowed = 0.2, seed=None, volvol=False):
+def sample_positive_rebonato_params(n_samples=1,max_allowed = 0.1, seed=None, volvol=False):
     """
     Generate Rebonato parameter sets (a, b, c, d) such that the corresponding vol surface is strictly positive.
 
@@ -1021,18 +1021,39 @@ def sample_positive_rebonato_params(n_samples=1,max_allowed = 0.2, seed=None, vo
     vol_funcs = []
     
     while len(valid_params) < n_samples:
+        state = 0#rng.choice([0, 1], p=[0.5, 0.5])
         if volvol:
-            # For h(tau): monotonic decay with floor
-            a = rng.uniform(0.6, 1.5)     # high start
-            b = rng.uniform(-0.1, 0.0)    # flat or gently decreasing
-            c = rng.uniform(1.0, 3.0)     # sharper decay
-            d = rng.uniform(0.2, 0.35)    # steady asymptote
+            # Define bounds for low and high states
+            low_bounds = {'a': 0.5, 'b': 0.0002, 'c': 1.9, 'd': 0.27}
+            high_bounds = {'a': 1.1, 'b': 0.00021, 'c': 2.3, 'd': 0.3}
+
+            # Randomly choose state (0 for low, 1 for high) with probability p=0.5
+            if state == 0:  # Low bound state
+                a = rng.uniform(low_bounds['a'], low_bounds['a'] + 0.1)
+                b = rng.uniform(low_bounds['b'], low_bounds['b'] + 0.00001)
+                c = rng.uniform(low_bounds['c'], low_bounds['c'] + 0.1)
+                d = rng.uniform(low_bounds['d'], low_bounds['d'] + 0.01)
+            else:  # High bound state
+                a = rng.uniform(high_bounds['a'] - 0.1, high_bounds['a'])
+                b = rng.uniform(high_bounds['b'] - 0.00001, high_bounds['b'])
+                c = rng.uniform(high_bounds['c'] - 0.1, high_bounds['c'])
+                d = rng.uniform(high_bounds['d'] - 0.01, high_bounds['d'])
         else:
-            # Sample raw params
-            a = rng.uniform(0.05, 0.30)
-            b = rng.uniform(-0.10, 0.20)
-            c = rng.uniform(0.2, 2.0)
-            d = rng.uniform(0.01, 0.10)
+            # Define bounds for low and high states
+            low_bounds = {'a': 0.0, 'b': 0.02, 'c': 0.5, 'd': 0.02}
+            high_bounds = {'a': 0.04, 'b': 0.15, 'c': 1.2, 'd': 0.026}
+
+            # Randomly choose state (0 for low, 1 for high) with probability p=0.5
+            if state == 0:  # Low bound state
+                a = rng.uniform(low_bounds['a'], low_bounds['a'] + 0.01)
+                b = rng.uniform(low_bounds['b'], low_bounds['b'] + 0.01)
+                c = rng.uniform(low_bounds['c'], low_bounds['c'] + 0.1)
+                d = rng.uniform(low_bounds['d'], low_bounds['d'] + 0.002)
+            else:  # High bound state
+                a = rng.uniform(high_bounds['a'] - 0.01, high_bounds['a'])
+                b = rng.uniform(high_bounds['b'] - 0.01, high_bounds['b'])
+                c = rng.uniform(high_bounds['c'] - 0.1, high_bounds['c'])
+                d = rng.uniform(high_bounds['d'] - 0.002, high_bounds['d'])
         param_set = (a, b, c, d)
 
         # Check positivity
@@ -1489,7 +1510,7 @@ class LMMSABR:
         
 
 
-    def simulate_forwards(self, seed=None):
+    def simulate_forwards(self, seed=None, minimum_starting_rate=0.01):
         np.random.seed(seed)
         dt = self.dt
         dt_sqrt = np.sqrt(dt)
@@ -1506,6 +1527,12 @@ class LMMSABR:
         ) * dt_sqrt
 
         f_0 = self.df_init["Forward"].values
+        # shift f_0 up by the difference between the minimum starting rate and the minimum starting rate
+        f_0_min = np.nanmin(f_0)
+        # calculated the needed shift
+        shift = max(minimum_starting_rate - f_0_min, 0)
+        # apply the shift
+        f_0 = f_0 + shift
         f_sim = np.full((self.n_steps, len(f_0)), np.nan)
         f_sim[0] = f_0   # temporary adjustment
         self.f_sim = f_sim
@@ -1583,11 +1610,11 @@ class LMMSABR:
         f_sim[np.tril_indices_from(f_sim, k=-1)] = np.nan
     
     
-    def simulate(self, shuffle_df=True,seed=None):
+    def simulate(self, shuffle_df=True,seed=None,minimum_starting_rate=0.01):
         #start_time = time.time()
         self.prepare_curves(shuffle_df=shuffle_df, seed=seed)
         self.precompute_vol_surfaces()
-        self.simulate_forwards(seed=seed)
+        self.simulate_forwards(seed=seed, minimum_starting_rate=minimum_starting_rate)
 
         return self.f_sim
     
@@ -1723,7 +1750,7 @@ class LMMSABR:
                 where=~np.isnan(swap_value[1:, :]) & ~np.isnan(swap_value[:-1, :])
             )
 
-            return np.stack([price, delta, gamma, vega, swaption_pnl, active], axis=-1), np.stack([swap_value, swap_pnl, active], axis=-1)
+            return np.stack([price, delta, gamma, vega, swaption_pnl, active], axis=-1), np.stack([swap_value, swap_pnl, active, annuity_ofs], axis=-1)
         
         
         hedge_metrics = risk_metrics(swap_hedge_expiry_relative_idx)
@@ -1887,8 +1914,8 @@ class LMMSABR:
         # Initialize arrays for storing results
         hedge_swaption = np.zeros((n_episodes, self.swap_sim_shape[0], self.swap_sim_shape[0], 6))
         liab_swaption = np.zeros((n_episodes, self.swap_sim_shape[0], self.swap_sim_shape[0], 6))
-        hedge_swap = np.zeros((n_episodes, self.swap_sim_shape[0], self.swap_sim_shape[0], 3))
-        liab_swap = np.zeros((n_episodes, self.swap_sim_shape[0], self.swap_sim_shape[0], 3))
+        hedge_swap = np.zeros((n_episodes, self.swap_sim_shape[0], self.swap_sim_shape[0], 4))
+        liab_swap = np.zeros((n_episodes, self.swap_sim_shape[0], self.swap_sim_shape[0], 4))
         # loop that assigns to the arrays
         print("Generating episodes...")
         for i in tqdm(range(n_episodes)):

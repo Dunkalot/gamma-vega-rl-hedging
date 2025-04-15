@@ -23,6 +23,10 @@ import agent.distributional as ad
 
 from absl import app
 from absl import flags
+from collections import OrderedDict
+import dataclasses
+def ordered_asdict(obj):
+    return OrderedDict((f.name, getattr(obj, f.name)) for f in dataclasses.fields(obj))
 
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('train_sim', 40_000, 'train episodes (Default 40_000)')
@@ -71,8 +75,8 @@ def make_logger(work_folder, label, terminal=False):
 
 def make_loggers(work_folder):
     return dict(
-        train_loop=make_logger(work_folder, 'train_loop', terminal=True),
-        eval_loop=make_logger(work_folder, 'eval_loop', terminal=True),
+        train_loop=make_logger(work_folder, 'train_loop', terminal=False),
+        eval_loop=make_logger(work_folder, 'eval_loop', terminal=False),
         learner=make_logger(work_folder, 'learner')
     )
 
@@ -245,7 +249,8 @@ def main(argv):
     #               mu=FLAGS.mu, ttms=[int(ttm) for ttm in FLAGS.liab_ttms],
     #              action_low=float(FLAGS.action_space[0]), action_high=float(FLAGS.action_space[1]))
     utils = Utils(n_episodes=FLAGS.train_sim, tenor=4)
-    environment = make_environment(utils=utils)
+    loggers = make_loggers(work_folder=work_folder)
+    environment = make_environment(utils=utils, logger=loggers['train_loop'])
     environment_spec = specs.make_environment_spec(environment)
     if FLAGS.critic == 'c51':
         agent_networks = make_networks(action_spec=environment_spec.actions, max_time_steps=FLAGS.init_ttm)
@@ -254,7 +259,6 @@ def main(argv):
     elif FLAGS.critic == 'iqn':
         assert FLAGS.obj_func == 'cvar', 'IQN only support CVaR objective.'
         agent_networks = make_iqn_networks(action_spec=environment_spec.actions,cvar_th=FLAGS.threshold, max_time_steps=FLAGS.init_ttm)
-    loggers = make_loggers(work_folder=work_folder)
 
     # Construct the agent.
     agent = D4PG(
@@ -298,7 +302,7 @@ def main(argv):
             agent_networks['policy'],
         ])
 
-
+    print("Starting evaluation")
     # Create the evaluation actor and loop.
     eval_actor = actors.FeedForwardActor(policy_network=eval_policy)
     # eval_utils = Utils(init_ttm=FLAGS.init_ttm, np_seed=FLAGS.eval_seed, num_sim=FLAGS.eval_sim, spread=FLAGS.spread, volvol=FLAGS.vov, sabr=FLAGS.sabr, gbm=FLAGS.gbm, hed_ttm=FLAGS.hed_ttm,
@@ -311,7 +315,7 @@ def main(argv):
     eval_env = make_environment(utils=eval_utils, logger=make_logger(work_folder,'eval_env'))
     eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])
     eval_loop.run(num_episodes=FLAGS.eval_sim)   
-    
+    print("Successfully finished.")
     Path(f'./logs/{work_folder}/ok').touch()
 
 if __name__ == '__main__':

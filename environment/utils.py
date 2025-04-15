@@ -39,7 +39,7 @@ class Utils:
         beta=0.5,
         B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42):
         self.seed = seed
-        
+        print(f"utils initiated with {spread=}, {poisson_rate=}, {n_episodes=}")
         
         self.spread = spread
         self.poisson_rate = poisson_rate
@@ -54,6 +54,7 @@ class Utils:
             swap_hedge_expiry=swap_hedge_expiry,
             swap_client_expiry=swap_client_expiry
         )
+        self.dt = self.lmm.dt
 
         self.num_period = self.lmm.swap_sim_shape[0] # number of steps
         #if ttms is None:
@@ -284,16 +285,20 @@ class Utils:
 
         
         # generate poisson arrival options for the liab_swaption
-        poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(liab_swaption.shape[0], liab_swaption.shape[1], liab_swaption.shape[2]))
+        poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(liab_swaption.shape[0], liab_swaption.shape[2]))
+        # Expand dimensions to match liab_swaption shape
+        poisson_draws = np.expand_dims(poisson_draws, axis=1)  # Add timestep dimension
+        poisson_draws = np.expand_dims(poisson_draws, axis=-1)  # Add metrics dimension
         # Binomial draws: number of +1s per entry
         num_pos = np.random.binomial(poisson_draws, 0.5)
         # Net direction: (2 * num_pos - total options)
         net_direction = 2 * num_pos - poisson_draws
         # Assign the net direction to the liab_swaption
-        liab_swaption *= net_direction[:, :, :, None]
+        liab_swaption *= net_direction
+        
 
         
-        return hedge_swaption, liab_swaption, hedge_swap, liab_swap
+        return hedge_swaption, liab_swaption, hedge_swap, liab_swap, net_direction
     
     
     def init_market_data(self, hedge_swaption, liab_swaption, hedge_swap, liab_swap):
