@@ -70,13 +70,13 @@ def make_logger(work_folder, label, terminal=False):
     
     logger = log_utils.Dispatcher(loggers, log_utils.to_numpy)
     logger = log_utils.NoneFilter(logger)
-    # loggers = log_utils.TimeFilter(logger, 1.0)
+    #loggers = log_utils.TimeFilter(logger, 1.0)
     return logger
 
 def make_loggers(work_folder):
     return dict(
-        train_loop=make_logger(work_folder, 'train_loop', terminal=False),
-        eval_loop=make_logger(work_folder, 'eval_loop', terminal=False),
+        train_loop=make_logger(work_folder, 'train_loop', terminal=True),
+        eval_loop=make_logger(work_folder, 'eval_loop', terminal=True),
         learner=make_logger(work_folder, 'learner')
     )
 
@@ -92,11 +92,40 @@ def make_environment(utils, logger = None) -> dm_env.Environment:
     return environment
 
 
+
+
+def sinusoidal_time_embedding(t_years: tf.Tensor, dim: int) -> tf.Tensor:
+    assert dim % 2 == 0
+    i = tf.range(dim//2, dtype=tf.float32)
+    freqs = 1.0 / (10000.0 ** (2 * i / dim))
+    angles = t_years * freqs  # now t_years∈[0,4], freqs span slow→fast
+    return tf.concat([tf.sin(angles), tf.cos(angles)], -1)
+
+def embed_time_observation(obs: tf.Tensor, time_dim: int = 16, dt=1/52) -> tf.Tensor:
+    # obs[..., :-3] holds everything but t,ttm_hed,ttm_liab
+    core, t_raw = obs[..., :-2], obs[..., -2:]
+    t_cont    = t_raw[..., 0:1] * dt     # in years
+    ttm_hed   = tf.clip_by_value(1.0 - t_cont, 0.0, 1.0)
+    ttm_liab  = tf.clip_by_value(2.0 - t_cont, 0.0, 2.0)
+    # embed both ttms
+    embed_hed  = sinusoidal_time_embedding(ttm_hed,  time_dim//2)
+    embed_liab = sinusoidal_time_embedding(ttm_liab, time_dim//2)
+    return tf.concat([core, embed_hed, embed_liab], -1)
+
+
+
+
 # The default settings in this network factory will work well for the
 # TradingENV task but may need to be tuned for others. In
 # particular, the vmin/vmax and num_atoms hyperparameters should be set to
 # give the distributional critic a good dynamic range over possible discounted
 # returns. Note that this is very different than the scale of immediate rewards.
+
+
+
+
+
+
 def make_networks(
     action_spec: specs.BoundedArray,
     policy_layer_sizes: Sequence[int] = (256, 256, 256),
@@ -153,16 +182,22 @@ def make_quantile_networks(
     action_spec: specs.BoundedArray,
     policy_layer_sizes: Sequence[int] = (256, 256, 256),
     critic_layer_sizes: Sequence[int] = (512, 512, 256),
-    quantile_interval: float = 0.01
+    quantile_interval: float = 0.01, 
+    time_embedding_dim: int = 16,dt =1/52
 ) -> Mapping[str, types.TensorTransformation]:
     """Creates the networks used by the agent."""
 
     # Get total number of action dimensions from action spec.
     num_dimensions = np.prod(action_spec.shape, dtype=int)
 
-    # Create the shared observation network; here simply a state-less operation.
-    observation_network = tf2_utils.batch_concat
 
+    
+
+
+    #Create the shared observation network; here simply a state-less operation.
+    def observation_network(obs: tf.Tensor, dt=dt) -> tf.Tensor:
+        return embed_time_observation(obs, time_embedding_dim)
+    #observation_network = tf2_utils.batch_concat
     # Create the policy network.
     policy_network = snt.Sequential([
         networks.LayerNormMLP(policy_layer_sizes, activate_final=True),
@@ -250,12 +285,12 @@ def main(argv):
     #              action_low=float(FLAGS.action_space[0]), action_high=float(FLAGS.action_space[1]))
     utils = Utils(n_episodes=FLAGS.train_sim, tenor=4)
     loggers = make_loggers(work_folder=work_folder)
-    environment = make_environment(utils=utils, logger=loggers['train_loop'])
+    environment = make_environment(utils=utils)#, logger=loggers['train_loop'])
     environment_spec = specs.make_environment_spec(environment)
     if FLAGS.critic == 'c51':
-        agent_networks = make_networks(action_spec=environment_spec.actions, max_time_steps=FLAGS.init_ttm)
+        agent_networks = make_networks(action_spec=environment_spec.actions, max_time_steps=utils.num_period)
     elif 'qr' in FLAGS.critic:
-        agent_networks = make_quantile_networks(action_spec=environment_spec.actions)
+        agent_networks = make_quantile_networks(action_spec=environment_spec.actions, time_embedding_dim=16, dt=utils.dt)
     elif FLAGS.critic == 'iqn':
         assert FLAGS.obj_func == 'cvar', 'IQN only support CVaR objective.'
         agent_networks = make_iqn_networks(action_spec=environment_spec.actions,cvar_th=FLAGS.threshold, max_time_steps=FLAGS.init_ttm)
@@ -311,7 +346,7 @@ def main(argv):
     #                    mu=0.0, ttms=[int(ttm) for ttm in FLAGS.liab_ttms],
     #                    action_low=float(FLAGS.action_space[0]), action_high=float(FLAGS.action_space[1]))
     # TODO: FIND UD AF HVORFOR DEN TERMINERER UDEN AT EVALUATE
-    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4)
+    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread)
     eval_env = make_environment(utils=eval_utils, logger=make_logger(work_folder,'eval_env'))
     eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])
     eval_loop.run(num_episodes=FLAGS.eval_sim)   

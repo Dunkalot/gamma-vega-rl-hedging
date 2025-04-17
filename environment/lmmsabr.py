@@ -43,6 +43,7 @@ def make_nss_yield_df(start_date='1986-12-01', end_date='2025-03-01', max_maturi
     yields_df = yields_df[start_date:end_date]#.dropna()#.resample('BME').last().to_period('M')
     return yields_df / 100
 
+
 def compute_6m_forward_curve(yields_df, tau=0.5):
     maturities = np.array([int(col.strip('m')) for col in yields_df.columns]) / 12
     fwd_df = pd.DataFrame(index=yields_df.index, columns=yields_df.columns[:-6])
@@ -55,11 +56,6 @@ def compute_6m_forward_curve(yields_df, tau=0.5):
         fwd_df.iloc[:, i] = (P_T / P_Tp - 1) / 0.5
 
     return fwd_df.astype(float)
-
-
-
-
-
 
 
 def estimate_X_full_PCA(df_forwards, n_components=5):
@@ -103,8 +99,6 @@ def tag_regime_and_stress(date):
         return 'Pandemic QE', 0
     else:
         return 'QT/Inflation', 2.5
-
-#forwards_data[['regime', 'stress']] = forwards_data.index.to_series().apply(lambda d: pd.Series(tag_regime_and_stress(d)))
 
 
 def compute_6m_forward_dataframe(yields_df, tau=0.5):
@@ -185,14 +179,6 @@ def sample_forward_curves(forwards_df, regime=None, stress=None, n=100):
     return df.loc[idx, df.columns[:-2]].values  # exclude regime and stress
 
 
-
-
-
-
-
-
-
-
 def doust_corr(beta, n):
     '''
     create nxn doust correlation with beta decay exponential
@@ -240,8 +226,6 @@ def interpolate_correlation_matrix(matrix: np.ndarray, resolution: int) -> np.nd
     return interpolated
 
 
-import numpy as np
-
 def interpolate_correlation_matrix_cv(matrix: np.ndarray, resolution: int) -> np.ndarray:
     if matrix.shape[0] != matrix.shape[1]:
         raise ValueError("Input must be a square matrix.")
@@ -250,9 +234,6 @@ def interpolate_correlation_matrix_cv(matrix: np.ndarray, resolution: int) -> np
     target_size = matrix.shape[0] + (matrix.shape[0] - 1) * (resolution - 1)
     # cv2.resize expects the shape as (width, height); ensure your matrix is in float32 if needed.
     return cv2.resize(matrix.astype(np.float32), (target_size, target_size), interpolation=cv2.INTER_LINEAR)
-
-
-
 
 
 def get_instant_vol_func(tau , params):
@@ -276,10 +257,6 @@ def get_instant_vol_func(tau , params):
     return instantaneous_vol
 
 
-
-
-
-
 def pairwise_outer(arr):
     """
     Given an array of shape (..., d), return an array of shape (..., d, d),
@@ -292,7 +269,6 @@ def pairwise_outer(arr):
     - out: np.ndarray, shape (..., d, d)
     """
     return arr[..., :, None] * arr[..., None, :]
-
 
 
 def sample_phi_diag_mvn(T, mean=-0.5, sigma=0.1, beta=0.1, clip_bounds=(-0.9, -0.3)):
@@ -311,8 +287,6 @@ def sample_phi_diag_mvn(T, mean=-0.5, sigma=0.1, beta=0.1, clip_bounds=(-0.9, -0
 
     # Clip to valid correlation bounds
     return np.clip(phi_diag, clip_bounds[0], clip_bounds[1])
-
-
 
 
 def build_phi_matrix(T, phi_diag, lambda3, lambda4):
@@ -334,10 +308,6 @@ def build_phi_matrix(T, phi_diag, lambda3, lambda4):
     
     # Multiply elementwise to get the final phi matrix
     return A * decay
-
-
-
-
 
 
 def sample_phi_matrix(
@@ -377,10 +347,6 @@ def sample_phi_matrix(
         "lambda3": lambda3,
         "lambda4": lambda4
     }
-
-
-
-
 
 
 def create_df_init_from_forward(fwd, resolution=2, tau=0.5):
@@ -450,7 +416,6 @@ def create_df_init_from_forward(fwd, resolution=2, tau=0.5):
     return df
 
 
-
 def create_df_init(df_fwd, df_raw_spot, resolution, tau=0.5):
 
     # Get the LIBOR 6-month spot rate
@@ -509,7 +474,7 @@ def create_df_init(df_fwd, df_raw_spot, resolution, tau=0.5):
     # =============================================================================
     df = pd.DataFrame({'Tenor': ts_fwd_interp, 'zcb': zcb_interp, 'Forward': np.nan})
     df.loc[ids_fwd_interp, 'Forward'] = fwd_canon
-    df.loc[ids_fwd_interp, 'k0'] = s0_exp
+    #df.loc[ids_fwd_interp, 'k0'] = s0_exp
     # add column with backfilled forward indices, such that the value in this column is 0 from 0 to 5, 1 from 6 to 11, 2 from 12 to 17, etc.    
     df['i_s'] = (np.arange(len(df)) // resolution)*resolution
     df['i_sp1'] = (np.arange(len(df)) // resolution+1)*resolution
@@ -700,7 +665,6 @@ def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolat
     return get_interp_rates
 
 
-
 def get_swap_matrix(f_sim, shape, resolution, tau, tenor, df, expiry_max=1, expiry_min=1, beta=0.5, B=0.5):
     """
     Compute time-evolving swap rates from a simulated forward path for a set of swap expiries.
@@ -826,41 +790,6 @@ def make_swap_indexer(n_steps, swap_idxs, resolution, tau, tenor, expiry, return
     return indexer 
 
 
-
-
-import numpy as np
-
-def sample_rebonato_params(n_samples=1, seed=None):
-    """
-    Generate plausible (a, b, c, d) parameter sets for the Rebonato instantaneous volatility function.
-
-    Parameters
-    ----------
-    n_samples : int
-        Number of parameter sets to generate.
-    seed : int or None
-        Random seed for reproducibility.
-
-    Returns
-    -------
-    params : np.ndarray
-        Array of shape (n_samples, 4), each row is (a, b, c, d)
-    """
-    rng = np.random.default_rng(seed)
-
-    a = rng.uniform(0.05, 0.30, size=n_samples)
-    b = rng.uniform(-0.10, 0.20, size=n_samples)
-    c = rng.uniform(0.2, 2.0, size=n_samples)
-    d = rng.uniform(0.01, 0.10, size=n_samples)
-
-    return np.stack([a, b, c, d], axis=1)
-
-
-
-
-
-
-
 def min_max_rebonato_vol(params, max_allowed=np.inf):
     """
     Compute the minimum and maximum value of the Rebonato instantaneous volatility function
@@ -911,8 +840,6 @@ def min_max_rebonato_vol(params, max_allowed=np.inf):
     is_valid = (min_val > 0) and (max_val <= max_allowed)
 
     return min_val, max_val, tau_star, is_valid
-
-
 
 
 def sample_phi_matrix_batch(
@@ -990,12 +917,12 @@ def sample_exponential_corr_matrix_batch(
 
     return matrices, meta_list
 
+
 def create_df_inits_from_samples(tau=0.5, resolution=2, n_samples=100):
     df_fwd = compute_6m_forward_dataframe(make_nss_yield_df())
     random_samples = sample_forward_curves(df_fwd, n=n_samples)
     df_init_list = [create_df_init_from_forward(sample, resolution=resolution, tau=tau) for sample in random_samples]
     return df_init_list
-
 
 
 def sample_positive_rebonato_params(n_samples=1,max_allowed = 0.1, seed=None, volvol=False):
@@ -1065,12 +992,6 @@ def sample_positive_rebonato_params(n_samples=1,max_allowed = 0.1, seed=None, vo
     return valid_params, vol_funcs
 
 
-
-
-
-
-
-
 class LMMSABR:
     def __init__(
         self,
@@ -1101,8 +1022,6 @@ class LMMSABR:
             self.t_max = t_max
         
         self.t_arr = np.linspace(0, self.t_max, int(self.t_max/self.dt +1))
-
-
 
 
     def prime_swap_data(self, swap_hedge_expiry, swap_client_expiry, tenor):
@@ -1504,10 +1423,6 @@ class LMMSABR:
         self.rho_mat_interp = interpolate_correlation_matrix_cv(self.rho_mat, self.resolution)
         self.theta_mat_0m_interpolated = interpolate_correlation_matrix_cv(self.theta_mat, self.resolution)
         self.phi_mat_0m_interpolated = interpolate_correlation_matrix_cv(self.phi_mat, self.resolution)
-
-        
-
-        
 
 
     def simulate_forwards(self, seed=None, minimum_starting_rate=0.01):
