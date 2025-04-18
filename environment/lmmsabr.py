@@ -22,6 +22,9 @@ from scipy.optimize import minimize
 from tqdm import tqdm
 from numba import njit, prange
 import psutil
+import os
+from pathlib import Path
+import pickle
 @njit
 def _simulate_core(f_sim, k_mat, g_mat, h_mat, phi_mat, rho_mat, dZ_f, dW_s, n_steps, dt, tau, rev_short, rev_ids, ttm_mat, beta):
     for t in range(n_steps-1):
@@ -1059,13 +1062,14 @@ class LMMSABR:
         
         
     ):
-
+        self.samples = None
         self.tau = np.float32(tau)
         self.resolution = np.int32(resolution)
         self.dt = np.float32(tau / resolution)
         self.beta = np.float32(beta)
         self.B = np.float32(B)
         self.sim_time = np.float32(sim_time)
+        self.primed = False
         # swap params
         self.prime_swap_data(swap_hedge_expiry, swap_client_expiry, tenor)
 
@@ -1103,9 +1107,10 @@ class LMMSABR:
 
     def sample_starting_conditions(
         self,
-        df_fwd,
+        df_fwd=None,
         n_samples=1,
-        curve_samples=None,
+        n_curves=None,
+        random_curves = False,
         rho_kwargs=None,
         theta_kwargs=None,
         phi_kwargs=None,
@@ -1125,6 +1130,8 @@ class LMMSABR:
         - fwd_kwargs: kwargs passed to `sample_forward_curves` (e.g. regime, stress)
         - seed: RNG seed for reproducibility
         """
+        if df_fwd is None:
+            df_fwd = compute_6m_forward_dataframe(make_nss_yield_df())
         T = self.t_arr
         rho_kwargs = rho_kwargs or {}
         theta_kwargs = theta_kwargs or {}
@@ -1139,8 +1146,12 @@ class LMMSABR:
         phi_batch, phi_meta = sample_phi_matrix_batch(T, n_samples, **phi_kwargs)
         g_params, _ = sample_positive_rebonato_params(n_samples=n_samples, seed=seed, **g_kwargs)
         h_params, _ = sample_positive_rebonato_params(n_samples=n_samples, volvol=True, seed=seed, **h_kwargs)
-        fwd_samples = sample_forward_curves(df_fwd, n=n_samples if curve_samples == None else curve_samples, **fwd_kwargs)
-        
+        if random_curves:
+            fwd_samples = sample_forward_curves(df_fwd, n=n_samples if n_curves == None else n_curves, **fwd_kwargs)
+        else:
+            print("random_curves set to False, using the first n_curves of the dataframe")
+            df_fwd_idx = df_fwd.index[:n_curves]
+            fwd_samples = df_fwd.loc[df_fwd_idx, df_fwd.columns[:-2]].values
         
         self.df_init_list = [create_df_init_from_forward(fwd, resolution=self.resolution, tau=self.tau) for fwd in fwd_samples]
         
@@ -1223,7 +1234,7 @@ class LMMSABR:
         self.phi_tensor = self.build_swap_correlation_tensor(self.phi_mat_0m_interpolated)
         self.G_tensor = self.precompute_G_tensor()
         self.ggh_tensor = self.build_V_tensor_from_scalar(tenor=self.tenor, resolution=self.resolution, tau=self.tau)[np.ix_(self.swap_idxs[0], self.swap_idxs[1])]
-
+        self.primed = True
  
     def get_sample_meta(self, sample_idx=0):
         if self.samples is None:
@@ -1862,48 +1873,99 @@ class LMMSABR:
         ax.view_init(elev=45, azim=210)
     
     
-    def generate_episodes(self, n_episodes=1000, poisson_rate=1.0):
+
+
+    def generate_episodes(
+        self,
+        n_episodes: int = 1000,
+        poisson_rate: float = 1.0,
+        block: int = 1000,
+        out_dir: str = "data/swaption_memmap"
+    ) -> str:
         """
-        Generate multiple episodes of forward rate simulations.
-        
-        Parameters
-        ----------
-        n_episodes : int
-            Number of episodes to generate.
-        
-        Returns
-        -------
-        None
+        Stream-generate `n_episodes` into five .dat files under `out_dir`, with a tqdm
+        progress bar and a final pickle of `self.lmm` for later reuse.
         """
-        n_episodes = n_episodes
-        self.poisson_rate = poisson_rate
-        # Initialize arrays for storing results
-        hedge_swaption = np.zeros((n_episodes, self.swap_sim_shape[0], self.swap_sim_shape[0], 6))
-        liab_swaption = np.zeros((n_episodes, self.swap_sim_shape[0], self.swap_sim_shape[0], 6))
-        hedge_swap = np.zeros((n_episodes, self.swap_sim_shape[0], self.swap_sim_shape[0], 5))
-        liab_swap = np.zeros((n_episodes, self.swap_sim_shape[0], self.swap_sim_shape[0], 5))
-        # generate poisson arrival options for the liab_swaption
-        poisson_draws = np.random.poisson(lam=self.poisson_rate, size=(liab_swaption.shape[0], liab_swaption.shape[2]))
-        # Expand dimensions to match liab_swaption shape
-        poisson_draws = np.expand_dims(poisson_draws, axis=1)  # Add timestep dimension
-        # Binomial draws: number of +1s per entry
-        num_pos = np.random.binomial(poisson_draws, 0.5)
-        # Net direction: (2 * num_pos - total options)
-        net_direction = 2 * num_pos - poisson_draws
-        net_direction = np.tile(net_direction, (1,liab_swaption.shape[2], 1))  # Expand to match liab_swaption shape
-        net_direction[:, np.triu_indices(liab_swaption.shape[2], k=1)[0], np.triu_indices(liab_swaption.shape[2], k=1)[1]] = 0
-        # loop that assigns to the arrays
-        #print("Generating episodes...")
-        for i in range(n_episodes):
-            self.simulate(seed=i)
-            self.get_swap_matrix()
-            res = self.get_sabr_params()
-            hedge_swaption[i], hedge_swap[i] = res[0]
-            liab_swaption[i], liab_swap[i] = res[1]
-        print("Done generating episodes.")
-        hedge_swaption = np.nan_to_num(hedge_swaption ).astype(np.float32) 
-        liab_swaption = np.nan_to_num(liab_swaption).astype(np.float32)
-        hedge_swap = np.nan_to_num(hedge_swap).astype(np.float32)
-        liab_swap = np.nan_to_num(liab_swap).astype(np.float32)
-        net_direction = np.nan_to_num(net_direction).astype(np.float32)
-        return hedge_swaption, liab_swaption, hedge_swap, liab_swap, net_direction
+        # prepare output directory
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        assert self.primed, "You must call prime() before generating episodes."
+        # 1) sample one episode to get dtype & per-episode shapes
+        self.simulate(seed=0)
+        self.get_swap_matrix()
+        (h0_sh, h0_sw), (l0_sh, l0_sw) = self.get_sabr_params()
+        T     = self.swap_sim_shape[0]
+        print(T)
+        dtype = h0_sh.dtype
+        shape6 = (T, T, h0_sh.shape[-1])   # = (T, T, 6)
+        shape5 = (T, T, h0_sw.shape[-1])   # = (T, T, 5)
+
+        # 2) create (or overwrite) five memmap files at full size
+        total6  = (n_episodes, *shape6)
+        total5  = (n_episodes, *shape5)
+        total_nd = (n_episodes, T, T)
+
+        # Create a timestamped subdirectory
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        timestamped_out_dir = f"{out_dir}/{timestamp}"
+        Path(timestamped_out_dir).mkdir(parents=True, exist_ok=True)
+
+        mm_h   = np.memmap(f"{timestamped_out_dir}/swaption_hed.dat",   mode="w+", dtype=dtype, shape=total6)
+        mm_l   = np.memmap(f"{timestamped_out_dir}/swaption_liab.dat", mode="w+", dtype=dtype, shape=total6)
+        mm_hs  = np.memmap(f"{timestamped_out_dir}/swap_hedge.dat",     mode="w+", dtype=dtype, shape=total5)
+        mm_ls  = np.memmap(f"{timestamped_out_dir}/swap_liab.dat",      mode="w+", dtype=dtype, shape=total5)
+        mm_nd  = np.memmap(f"{timestamped_out_dir}/net_direction.dat",  mode="w+", dtype=dtype, shape=total_nd)
+
+
+        # 3) loop over episodes in blocks, with tqdm
+        for start in tqdm(range(0, n_episodes, block),
+                          desc="Generating episode blocks",
+                          unit="block"):
+            b = min(block, n_episodes - start)
+
+            # generate net_direction for this block
+            pd = np.random.poisson(lam=poisson_rate, size=(b, T))[:, None, :]
+            num_pos  = np.random.binomial(pd, 0.5)
+            nd_block = 2 * num_pos - pd
+            iu = np.triu_indices(T, k=1)
+            nd_block = np.tile(nd_block, (1,T, 1)) 
+            nd_block[:, iu[0], iu[1]] = 0
+            nd_block = np.nan_to_num(nd_block).astype(dtype)
+
+            # prepare in‑RAM buffers
+            hd_b = np.empty((b, *shape6), dtype=dtype)
+            ld_b = np.empty((b, *shape6), dtype=dtype)
+            hs_b = np.empty((b, *shape5), dtype=dtype)
+            ls_b = np.empty((b, *shape5), dtype=dtype)
+
+            # fill buffers
+            for i in range(b):
+                ep_idx = start + i
+                self.simulate(seed=ep_idx)
+                self.get_swap_matrix()
+                (h_sh, h_sw), (l_sh, l_sw) = self.get_sabr_params()
+                hd_b[i] = np.nan_to_num(h_sh)
+                ld_b[i] = np.nan_to_num(l_sh)
+                hs_b[i] = np.nan_to_num(h_sw)
+                ls_b[i] = np.nan_to_num(l_sw)
+
+            # write and flush this block
+            mm_h  [start:start+b] = hd_b
+            mm_l  [start:start+b] = ld_b
+            mm_hs [start:start+b] = hs_b
+            mm_ls [start:start+b] = ls_b
+            mm_nd [start:start+b] = nd_block
+
+            mm_h .flush()
+            mm_l .flush()
+            mm_hs.flush()
+            mm_ls.flush()
+            mm_nd.flush()
+
+        # 4) pickle the LMMModel itself for later reuse
+        pickle_path = Path(timestamped_out_dir) / "lmm_model.pkl"
+        with open(pickle_path, "wb") as f:
+            pickle.dump(self.samples, f)
+
+        print(f"All episodes streamed to disk in '{timestamped_out_dir}'.")
+        print(f"LMMModel object saved to '{pickle_path}'.")
+        return timestamped_out_dir

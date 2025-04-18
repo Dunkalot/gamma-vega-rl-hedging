@@ -179,13 +179,18 @@ class Utils:
         sim_time = 1,
         t_max=None,
         beta=0.5,
-        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42):
+        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42, swap_spread=0.0001, contract_size=10000
+        ):
+
         self.seed = seed
         print(f"utils initiated with {spread=}, {poisson_rate=}, {n_episodes=}")
         
         print(f"\nMemory usage before lmm: {psutil.Process().memory_info().rss / 1e6:.2f} MB")
 
+        self.swap_spread = swap_spread
         self.spread = spread
+        print("SWAPTION SPREAD IS: ", self.swap_spread, "SWAP SPREAD IS: ", self.spread)
+
         self.poisson_rate = poisson_rate
         self.n_episodes = n_episodes
         self.lmm:LMMSABR = LMMSABR(tau=tau,

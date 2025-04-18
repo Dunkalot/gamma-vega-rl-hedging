@@ -57,8 +57,9 @@ class SwapKeys(IntEnum):
 class Swaps(AssetInterface):
     """Swap instrument book (hedge + liability legs)."""
 
-    def __init__(self, price_path_hed, price_path_liab) -> None:
+    def __init__(self, price_path_hed, price_path_liab, utils) -> None:
         super().__init__()
+        self.utils = utils
         self.swap_data_hed: np.ndarray = price_path_hed
         self.swap_data_liab: np.ndarray = price_path_liab
 
@@ -72,6 +73,8 @@ class Swaps(AssetInterface):
         # Align hedging and liability trajectories on time index `t`.
         self.active_path_hed  = self.swap_data_hed [sim_episode]
         self.active_path_liab = self.swap_data_liab[sim_episode]
+        self.position_hed = np.zeros((self.swap_data_hed.shape[1], self.swap_data_hed.shape[2]))
+        self.position_liab = np.zeros((self.swap_data_liab.shape[1], self.swap_data_liab.shape[2]))
         self.episode = sim_episode
 
     def step(self, t):
@@ -83,8 +86,8 @@ class Swaps(AssetInterface):
 
     def get_value(self, t) -> np.ndarray:
         """Return [hedge_value, liability_value] at time *t*."""
-        val_hed  = self.active_path_hed [t, t, SwapKeys.PRICE]
-        val_liab = self.active_path_liab[t, t, SwapKeys.PRICE]  
+        val_hed  = self.active_path_hed [t, t, SwapKeys.PRICE] * self.position_hed * self.utils.contract_size
+        val_liab = self.active_path_liab[t, t, SwapKeys.PRICE] * self.position_liab * self.utils.contract_size
         return np.array([val_hed, val_liab])
     
     def get_delta_vec(self, t):
@@ -108,16 +111,23 @@ class Swaps(AssetInterface):
         return self.active_path_liab[t, t, SwapKeys.RATE]
     
 
-    def set_position(self, t, action_swap_hed, action_swap_liab):
+    def add(self, t, action_swap_hed, action_swap_liab):
         """Stamp *immutable* positions at inception (column t)."""
         self.position_hed [:, t] = action_swap_hed
         self.position_liab[:, t] = action_swap_liab
+        price_hed  = self.active_path_hed [t, t, SwapKeys.PRICE]
+        price_liab = self.active_path_liab[t, t, SwapKeys.PRICE]
+        cost_hed   = -abs(self.utils.swap_spread * price_hed  * action_swap_hed)
+        cost_liab  = -abs(self.utils.swap_spread * price_liab * action_swap_liab)
 
-        # zero‑out inactive slots according to ACTIVE mask
-        self.position_hed  *= self.active_path_hed [:, :, SwapKeys.ACTIVE]
-        self.position_liab *= self.active_path_liab[:, :, SwapKeys.ACTIVE]
-
-        return self.position_hed[t, t], self.position_liab[t, t]
+        return cost_hed + cost_liab
+    
+    def get_position_hed(self, t):
+        """Get the current position of the portfolio at timestep t."""
+        return self.position_hed[t, t].copy()
+    def get_position_liab(self, t):
+        """Get the current position of the portfolio at timestep t."""
+        return self.position_liab[t, t].copy()
 
 
 class Greek(IntEnum):
@@ -161,7 +171,7 @@ class SwaptionPortfolio:
         self._active[sim_episode, t:, t] = 1  # Mark these positions as active
 
         price = self._base_options[sim_episode, t, t, Greek.PRICE]
-        transaction_cost = -abs(self.utils.spread * price * num_contracts)
+        transaction_cost = -abs(self.utils.spread * price * num_contracts * self.utils.contract_size)
         return transaction_cost
 
     def get_metric(self, t, greek, position_scale=True, summed=True, single_value=False):
@@ -192,7 +202,7 @@ class SwaptionPortfolio:
             # Retrieve full vector along the swap axis
             values = self._base_options[self._episode, t, :, greek]
             active = self._active[self._episode, t, :]
-            scale = self._positions[self._episode, t, :] if position_scale else np.ones_like(active)
+            scale = self._positions[self._episode, t, :] * self.utils.contract_size if position_scale else np.ones_like(active)
             result = values * scale * active
             return np.nansum(result) if summed else result
 
@@ -226,13 +236,13 @@ class SwaptionPortfolio:
         values = self._base_options[self._episode, t, :, Greek.PNL]
         active = self._active      [self._episode, t, :]
         pos    = self._positions   [self._episode, t, :]
-        return np.nansum(_safe_mul(values, _safe_mul(pos, active)))
+        return np.nansum(_safe_mul(values, _safe_mul(pos, active)))* self.utils.contract_size
 
     def get_value(self, t):
         values = self._base_options[self._episode, t, :, Greek.PRICE]
         active = self._active      [self._episode, t, :]
         pos    = self._positions   [self._episode, t, :]
-        return np.nansum(_safe_mul(values, _safe_mul(pos, active)))
+        return np.nansum(_safe_mul(values, _safe_mul(pos, active))) * self.utils.contract_size
 
     def get_current_position(self,t):
         """Get the current position of the portfolio at timestep t."""
@@ -247,9 +257,9 @@ class SwaptionLiabilityPortfolio(SwaptionPortfolio):
     def __init__(self, utils, swaption_data, positions):
         super().__init__(utils, swaption_data)
         # Compute max gamma/vega across all swaptions for this dataset (optional, for scaling bounds)
-        self.max_gamma = np.nanmax(np.abs(self._base_options[..., Greek.GAMMA]))
-        self.max_vega = np.nanmax(np.abs(self._base_options[..., Greek.VEGA]))
         self._positions = positions
+        self.max_gamma = np.nanmax(np.abs(self._base_options[..., Greek.GAMMA] * self._positions * self.utils.contract_size))
+        self.max_vega = np.nanmax(np.abs(self._base_options[..., Greek.VEGA] * self._positions * self.utils.contract_size))
 
 
     def reset(self):
@@ -291,7 +301,7 @@ class MainPortfolio(AssetInterface):
         self.liab_offset_idx = self.hed_port._base_options.shape[2] 
 
         #self.underlying = Stock(self.a_price)
-        self.underlying = Swaps(hedge_swap, liab_swap)  # WE USING SWAPS INSTEAD
+        self.underlying = Swaps(hedge_swap, liab_swap, utils=utils)  # WE USING SWAPS INSTEAD
         self.sim_episode = -1
         self.kernel_beta = 1 # standard deviation of the kernel
         self.use_rbf_kernel = False
@@ -401,17 +411,19 @@ class MainPortfolio(AssetInterface):
         rate_hed = np.nan_to_num(self.underlying.get_rate_hed(t), nan=0.0)
         rate_liab = np.nan_to_num(self.underlying.get_rate_liab(t), nan=0.0)
 
+        # for information to determine swap position size
+        delta_portfolio = np.nan_to_num(self.get_delta(t), nan=0.0)
+        delta_local_spot = np.nan_to_num(self.get_delta_local_spot(t), nan=0.0)
+        delta_local_hed = np.nan_to_num(self.get_delta_local_hed(t), nan=0.0)
+        delta_local_liab = np.nan_to_num(self.get_delta_local_liab(t), nan=0.0)
+        
+        
         # total portfolio gamma
         gamma_portfolio = np.nan_to_num(self.get_gamma(t), nan=0.0)
         gamma_local = np.nan_to_num(self.get_gamma_local_hed(t), nan=0.0)
         hed_gamma_unit = np.nan_to_num(self.hed_port.get_gamma(t, position_scale=False, single_value=True), nan=0.0)
 
 
-        # for information to determine swap position size
-        delta_portfolio = np.nan_to_num(self.get_delta(t), nan=0.0)
-        delta_local_spot = np.nan_to_num(self.get_delta_local_spot(t), nan=0.0)
-        delta_local_hed = np.nan_to_num(self.get_delta_local_hed(t), nan=0.0)
-        delta_local_liab = np.nan_to_num(self.get_delta_local_liab(t), nan=0.0)
 
         # swaption delta, unscaled
         hed_delta = np.nan_to_num(self.hed_port.get_delta(t, position_scale=False, single_value=True), nan=0.0)
@@ -426,6 +438,8 @@ class MainPortfolio(AssetInterface):
             hed_vega = np.nan_to_num(self.hed_port.base_options[self.sim_episode, t, t, Greek.VEGA], nan=0.0)
             state.extend([vega,vega_local, hed_vega])
 
+        
+        
         #print("state", state)
         state.append(t)
         # rate_hed, rate_liab, delta, delta_local_spot, delta_local_hed, delta_local_liab, hed_delta,liab_delta, 
@@ -438,7 +452,7 @@ class MainPortfolio(AssetInterface):
 
     def step(self, action_swaption_hed, action_swap_hed, action_swap_liab, t, result):
         result.hed_cost = reward = np.nan_to_num(self.hed_port.add(self.sim_episode, t, action_swaption_hed))
-        result.swap_position = self.underlying.set_position(t, action_swap_hed, action_swap_liab)
+        result.swap_position = self.underlying.add(t, action_swap_hed, action_swap_liab)
 
         result.liab_port_pnl = self.liab_port.step(t)
         result.hed_port_pnl  = self.hed_port.step(t)

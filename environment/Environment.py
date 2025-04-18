@@ -9,7 +9,7 @@ from absl import flags
 FLAGS = flags.FLAGS
 import copy
 from acme.utils import loggers
-
+import logging
 import numpy as np
 
 from environment.Trading import MainPortfolio, Greek, SwapKeys
@@ -70,41 +70,41 @@ class TradingEnv(gym.Env):
         # self.action_space = spaces.Box(low=np.array([0]), 
         #                                high=np.array([1.0]), dtype=np.float32)
         self.action_space = spaces.Box( # swaption hedge, 1y swap hedge, 2y swap hedge
-            low=np.zeros(3, dtype=np.float32),
-            high=np.ones(3, dtype=np.float32),
+            low=np.zeros(4, dtype=np.float32),
+            high=np.ones(4, dtype=np.float32),
             dtype=np.float32
         )
 
         # Observation space
-        max_gamma = self.portfolio.liab_port.max_gamma
-        max_vega = self.portfolio.liab_port.max_vega
+        max_gamma = self.portfolio.liab_port.max_gamma *50
+        max_vega = self.portfolio.liab_port.max_vega *50
         # minimum price per expiry across all episodes
-        min_price_swap_hed = np.min(self.portfolio.underlying.swap_data_hed[:,:,:, SwapKeys.RATE])
-        min_price_swap_liab = np.min(self.portfolio.underlying.swap_data_liab[:,:,:, SwapKeys.RATE])
-        max_price_swap_hed = np.max(self.portfolio.underlying.swap_data_hed)
-        max_price_swap_liab = np.max(self.portfolio.underlying.swap_data_liab)
+        min_rate_swap_hed = np.min(self.portfolio.underlying.swap_data_hed[:,:,:, SwapKeys.RATE])
+        min_rate_swap_liab = np.min(self.portfolio.underlying.swap_data_liab[:,:,:, SwapKeys.RATE])
+        max_rate_swap_hed = np.max(self.portfolio.underlying.swap_data_hed)
+        max_rate_swap_liab = np.max(self.portfolio.underlying.swap_data_liab)
 
-        obs_lowbound = np.array([ min_price_swap_hed,
-                                    min_price_swap_liab,
+        obs_lowbound = np.array([ min_rate_swap_hed,
+                                    min_rate_swap_liab,
                                     -np.inf, 
                                     -np.inf,
                                     -np.inf, 
                                     -np.inf, 
                                     -np.inf,
                                   
-                                 -1 * max_gamma , 
+                                 -1 * max_gamma ,  # multiply by 50 for uncertainty management since we cant load all episodes at once
                                  -np.inf,
                                  -np.inf])
         obs_highbound = np.array([      
-                                    max_price_swap_hed,  
-                                    max_price_swap_liab,                               
+                                    max_rate_swap_hed,  
+                                    max_rate_swap_liab,                               
                                     np.inf, 
                                     np.inf, 
                                     np.inf, 
                                     np.inf, 
                                     np.inf,
                            
-                                  max_gamma ,
+                                  max_gamma,
                                     np.inf,
                                   np.inf])
         # concat prices  and gamma
@@ -177,14 +177,29 @@ class TradingEnv(gym.Env):
 
 
 
-        gamma_hedge_ratio = _safe_div(-portfolio_gamma, gamma_hedge_unit)
-        vega_action_bound  = _safe_div(-portfolio_vega , vega_hedge_unit) if FLAGS.vega_obs else 0.0
-        action_space = [0, gamma_hedge_ratio, vega_action_bound]
+        
 
-        action_space = np.max(np.abs(action_space))
+        tol = 1e-8
 
-        #action_swaption_hedge = low_val + action[0] * (high_val - low_val)
-        action_swaption_hedge =  over_hedge_scale*action[0] * gamma_hedge_ratio # counter hedge risk direction
+        # 1) Check that the hedge instrument actually has nonzero gamma & vega
+        if np.isclose(gamma_hedge_unit, 0.0, atol=tol):
+            logging.warning(f"gamma_hedge_unit is near zero ({gamma_hedge_unit}); skipping gamma hedge this step")
+        if FLAGS.vega_obs and np.isclose(vega_hedge_unit, 0.0, atol=tol):
+            logging.warning(f"vega_hedge_unit is near zero ({vega_hedge_unit}); skipping vega hedge this step")
+
+        # 2) Now compute the ratios safely
+        gamma_hedge_ratio = _safe_div(portfolio_gamma, gamma_hedge_unit)
+        vega_hedge_ratio  = _safe_div(portfolio_vega , vega_hedge_unit) if FLAGS.vega_obs else 0.0
+
+        # 3) Check if the *exposures* are effectively zero
+        if np.isclose(gamma_hedge_ratio, 0.0, atol=tol):
+            logging.info("portfolio_gamma is effectively zero → no gamma hedge needed")
+        if FLAGS.vega_obs and np.isclose(vega_hedge_ratio, 0.0, atol=tol):
+            logging.info("portfolio_vega is effectively zero → no vega hedge needed")
+        hedge_direction =  -(action[0] * gamma_hedge_ratio + (1 - action[0]) * vega_hedge_ratio)
+
+        hedge_magnitude = over_hedge_scale * action[1]
+        action_swaption_hedge = hedge_magnitude * hedge_direction
 
         delta_hedge_unit = hed_port.get_delta(t, position_scale=False, single_value=True) # delta for swaption to be traded
 
@@ -208,17 +223,15 @@ class TradingEnv(gym.Env):
 
         
 
-        action_swap_hedge = -over_hedge_scale * action[1] * _safe_div(
+        action_swap_hedge = -over_hedge_scale * action[2] * _safe_div(
             delta_hed_total,
             self.portfolio.underlying.active_path_hed[self.t, self.t, SwapKeys.DELTA])
 
-        action_swap_liab = -over_hedge_scale * action[2] * _safe_div(
+        action_swap_liab = -over_hedge_scale * action[3] * _safe_div(
             delta_liab_total,
             self.portfolio.underlying.active_path_liab[self.t, self.t, SwapKeys.DELTA])
         
-        
-        result.bound_low = low_val
-        result.bound_high = high_val
+
         result.step_pnl = reward = self.portfolio.step(
             action_swaption_hed=action_swaption_hedge,
             action_swap_hed=action_swap_hedge,
@@ -233,6 +246,7 @@ class TradingEnv(gym.Env):
         state = self.portfolio.get_state(self.t)
         if self.t == self.num_period - 1:
             done = True
+            state[2:-1] = 0 # all all greeks to 0
             #state[1:] = 0 this is handled in the tensors. 
         else:
             done = False
