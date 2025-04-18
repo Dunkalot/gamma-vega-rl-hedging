@@ -1,7 +1,6 @@
 /sub/**
 
 /logs/**
-environment/__pycache__/Environment.cpython-39.pyc
-environment/__pycache__/lmmsabr.cpython-39.pyc
-environment/__pycache__/Trading.cpython-39.pyc
-environment/__pycache__/utils.cpython-39.pyc
+environment/__pycache__/**
+
+/data/** 
