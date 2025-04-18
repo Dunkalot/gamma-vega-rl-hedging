@@ -1911,11 +1911,11 @@ class LMMSABR:
         total5   = (n_episodes, *shape5)
         total_nd = (n_episodes, T, T)
 
-        mm_h   = np.memmap(f"{timestamped_out_dir}/swaption_hed.dat",   mode="w+", dtype=save_dtype, shape=total6)
-        mm_l   = np.memmap(f"{timestamped_out_dir}/swaption_liab.dat", mode="w+", dtype=save_dtype, shape=total6)
-        mm_hs  = np.memmap(f"{timestamped_out_dir}/swap_hedge.dat",     mode="w+", dtype=save_dtype, shape=total5)
-        mm_ls  = np.memmap(f"{timestamped_out_dir}/swap_liab.dat",      mode="w+", dtype=save_dtype, shape=total5)
-        mm_nd  = np.memmap(f"{timestamped_out_dir}/net_direction.dat",  mode="w+", dtype=save_dtype, shape=total_nd)
+        mm_h   = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swaption_hed.dat",   mode="w+", dtype=save_dtype, shape=total6)
+        mm_l   = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swaption_liab.dat", mode="w+", dtype=save_dtype, shape=total6)
+        mm_hs  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swap_hedge.dat",     mode="w+", dtype=save_dtype, shape=total5)
+        mm_ls  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swap_liab.dat",      mode="w+", dtype=save_dtype, shape=total5)
+        mm_nd  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/net_direction.dat",  mode="w+", dtype=save_dtype, shape=total_nd)
 
         # 4) loop over episodes in blocks, with tqdm
         for start in tqdm(range(0, n_episodes, block),
