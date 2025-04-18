@@ -829,7 +829,7 @@ def make_swap_indexer(n_steps, swap_idxs, resolution, tau, tenor, expiry, return
     swap_len = n_payments
     valid_steps = swap_idxs[0]
     col_indices = swap_idxs[1]
-    offsets = np.arange(n_payments, dtype=np.float32) * resolution
+    offsets = np.arange(n_payments, dtype=np.int32) * resolution
     col_indices = col_indices[:, None] + offsets[None, :]
     col_indices = np.broadcast_to(col_indices, (len(valid_steps), *col_indices.shape))
     def indexer(mat):
@@ -1074,8 +1074,7 @@ class LMMSABR:
             self.t_max = self.max_swap_expiry + tenor + self.sim_time
         else:
             self.t_max = t_max
-        self.t_max = np.float32(t_max)
-
+        self.t_max = np.float32(self.t_max)
         self.t_arr = np.linspace(0, self.t_max, int(self.t_max/self.dt +1), dtype=np.float32)
         ttm_mat = self.t_arr[None, :] - self.t_arr[:,None]
         self.ttm_mat = ttm_mat
@@ -1092,7 +1091,7 @@ class LMMSABR:
         self.swap_hedge_expiry_relative = self.swap_hedge_expiry - self.min_swap_expiry
         self.swap_liab_expiry_relative = self.swap_liab_expiry - self.min_swap_expiry
         self.swap_sim_shape = self.t_to_idx(self.sim_time), self.t_to_idx(self.max_swap_expiry - self.min_swap_expiry+ self.sim_time)
-        self.swap_idxs = np.arange(self.swap_sim_shape[0]),np.arange(self.t_to_idx(self.min_swap_expiry), self.swap_sim_shape[1]+self.t_to_idx(self.min_swap_expiry, dtype=np.int32))
+        self.swap_idxs = np.arange(self.swap_sim_shape[0]),np.arange(self.t_to_idx(self.min_swap_expiry), self.swap_sim_shape[1]+self.t_to_idx(self.min_swap_expiry))
         
     
     def t_to_idx(self, t):
@@ -1325,7 +1324,7 @@ class LMMSABR:
         corr_subs = np.empty((n_swaps, n_payments, n_payments))
         expiry_idxs = self.swap_idxs[1]
         for i, T_idx in enumerate(expiry_idxs):
-            indices = T_idx + np.arange(n_payments, dtype=np.float32) * self.resolution
+            indices = T_idx + np.arange(n_payments, dtype=np.int32) * self.resolution
             corr_subs[i] = corr_mat[np.ix_(indices, indices)]
 
         # Tile over time steps
@@ -1895,16 +1894,16 @@ class LMMSABR:
         net_direction[:, np.triu_indices(liab_swaption.shape[2], k=1)[0], np.triu_indices(liab_swaption.shape[2], k=1)[1]] = 0
         # loop that assigns to the arrays
         #print("Generating episodes...")
-        for i in tqdm(range(n_episodes)):
+        for i in range(n_episodes):
             self.simulate(seed=i)
             self.get_swap_matrix()
             res = self.get_sabr_params()
             hedge_swaption[i], hedge_swap[i] = res[0]
             liab_swaption[i], liab_swap[i] = res[1]
         print("Done generating episodes.")
-        hedge_swaption = np.nan_to_num(hedge_swaption, dtype=np.float32)    
-        liab_swaption = np.nan_to_num(liab_swaption, dtype=np.float32)
-        hedge_swap = np.nan_to_num(hedge_swap, dtype=np.float32)
-        liab_swap = np.nan_to_num(liab_swap, dtype=np.float32)
-        net_direction = np.nan_to_num(net_direction, dtype=np.float32)
+        hedge_swaption = np.nan_to_num(hedge_swaption ).astype(np.float32) 
+        liab_swaption = np.nan_to_num(liab_swaption).astype(np.float32)
+        hedge_swap = np.nan_to_num(hedge_swap).astype(np.float32)
+        liab_swap = np.nan_to_num(liab_swap).astype(np.float32)
+        net_direction = np.nan_to_num(net_direction).astype(np.float32)
         return hedge_swaption, liab_swaption, hedge_swap, liab_swap, net_direction

@@ -199,14 +199,15 @@ class Utils:
             swap_client_expiry=swap_client_expiry
         )
         self.dt = self.lmm.dt
-
+        df_fwd = compute_6m_forward_dataframe(make_nss_yield_df())
+        self.lmm.sample_starting_conditions(df_fwd, curve_samples=min(self.n_episodes,len(df_fwd)))
+        self.lmm.prime()
         self.num_period = self.lmm.swap_sim_shape[0] # number of steps
         print(f"Memory usage after: {psutil.Process().memory_info().rss / 1e6:.2f} MB\n")
 
 
     
     def generate_swaption_market_data(self,
-                                    n_episodes: int,
                                     cache_path: str = "./data/swaption_data.h5",
                                     block: int = 1000)-> Tuple[EpisodeArray, EpisodeArray, EpisodeArray, EpisodeArray, EpisodeArray]:
         """
