@@ -14,72 +14,22 @@ import numpy as np
 
 from environment.Trading import MainPortfolio, Greek, SwapKeys
 
-#@dataclasses.dataclass
-#class StepResult:
-    # """Logging step metrics for analysis
-    # """
-    # episode: int = 0
-    # t: int = 0
-    # hed_action: float = 0.
-    # #hed_share: float = 0.
-    # action_swaption_hed: float = 0.
-    # position_swaption_liab: float = 0.
-    # bound_low : float = 0.
-    # bound_high : float = 0.
-    # # action_swap_hed: float = 0.
-    # # action_swap_liab: float = 0.
-    # # swap_price: float = 0.
-    # # swap_position: float = 0.
-    # # swap_pnl: float = 0.
-    # # liab_port_gamma: float = 0.
-    # # liab_port_vega: float = 0.
-    # # liab_port_pnl: float = 0.
-    # # hed_cost: float = 0.
-    # # hed_port_gamma: float = 0.
-    # # hed_port_vega: float = 0.
-    # # hed_port_pnl: float = 0.
-    # # gamma_before_hedge: float = 0.
-    # # gamma_after_hedge: float = 0.
-    # # vega_before_hedge: float = 0.
-    # # vega_after_hedge: float = 0.
-    # # step_pnl: float = 0.
-    # # state_price_hed: float = 0.
-    # # state_price_liab: float = 0.
-    # # state_delta: float = 0.
-    # # state_delta_local_hed: float = 0.
-    # # state_delta_local_liab: float = 0.
-    # # state_hed_delta: float = 0.
-    # # state_liab_delta: float = 0.
-    # # state_gamma: float = 0.
-    # state_gamma_local: float = 0.
-    # state_hed_gamma: float = 0.
-    # # state_vega: float = 0.
-    # state_vega_local: float = 0.
-    # state_hed_vega: float = 0.
-    #pass
+def _safe_div(num, den, default=0.0):
+    # 1) elementwise division (possibly INF/NAN) in C
+    # 2) nan/±inf→default in C
+    with np.errstate(divide='ignore', invalid='ignore'):
+        raw = num / den
+    return np.nan_to_num(raw, nan=default, posinf=default, neginf=default)
+
 @dataclasses.dataclass
 class StepResult:
     episode: int = 0
     t: int = 0
-
-    # === Agent output and hedge taken ===
-    hed_action: float = 0.  # raw action[0] ∈ [0,1]
-    bound_low: float = 0.
-    bound_high: float = 0.
-    gamma_hedge_unit: float = 0.  # gamma of the hedge instrument (per unit)
-    action_swaption_hed: float = 0.  # notional traded for gamma hedge (computed)
-
-    # === Gamma before and after hedge ===
-    gamma_before_hedge: float = 0.  # total portfolio gamma before hedge
-    gamma_after_hedge: float = 0.  # total portfolio gamma after hedge
-    liab_port_gamma: float = 0.  # gamma from liability-side swaptions
-    hed_port_gamma: float = 0.  # gamma from hedging book swaptions
-
-
-    # === State features (gamma info seen by the agent) ===
-    state_gamma_local: float = 0.  # portfolio gamma (possibly kernel-weighted)
-    state_hed_gamma: float = 0.  # gamma of the hedge instrument (per unit)
-    position_swaption_liab: float = 0.
+    hed_action: float = 0.0
+    gamma_before_hedge: float = 0.0
+    gamma_after_hedge: float = 0.0
+    vega_before_hedge: float = 0.0
+    vega_after_hedge: float = 0.0
 
 
 
@@ -129,14 +79,15 @@ class TradingEnv(gym.Env):
         max_gamma = self.portfolio.liab_port.max_gamma
         max_vega = self.portfolio.liab_port.max_vega
         # minimum price per expiry across all episodes
-        min_price_swap_hed = np.min(self.portfolio.underlying.swap_data_hed)
-        min_price_swap_liab = np.min(self.portfolio.underlying.swap_data_liab)
+        min_price_swap_hed = np.min(self.portfolio.underlying.swap_data_hed[:,:,:, SwapKeys.RATE])
+        min_price_swap_liab = np.min(self.portfolio.underlying.swap_data_liab[:,:,:, SwapKeys.RATE])
         max_price_swap_hed = np.max(self.portfolio.underlying.swap_data_hed)
         max_price_swap_liab = np.max(self.portfolio.underlying.swap_data_liab)
 
         obs_lowbound = np.array([ min_price_swap_hed,
                                     min_price_swap_liab,
                                     -np.inf, 
+                                    -np.inf,
                                     -np.inf, 
                                     -np.inf, 
                                     -np.inf,
@@ -147,6 +98,7 @@ class TradingEnv(gym.Env):
         obs_highbound = np.array([      
                                     max_price_swap_hed,  
                                     max_price_swap_liab,                               
+                                    np.inf, 
                                     np.inf, 
                                     np.inf, 
                                     np.inf, 
@@ -207,96 +159,74 @@ class TradingEnv(gym.Env):
             t=self.t,
             hed_action=action,
         )
-
+        
+        over_hedge_scale = 1.5
         t = self.t
-        ep = self.sim_episode
 
         hed_port = self.portfolio.hed_port
-        liab_port = self.portfolio.liab_port
-        # === Gamma hedge ===
+
+
+        
         gamma_hedge_unit = hed_port.get_gamma(t, position_scale=False, single_value=True)
         portfolio_gamma = self.portfolio.get_gamma_local_hed(t) # gamma sensitivity around the hedging swaption
 
-        gamma_action_bound = -portfolio_gamma / gamma_hedge_unit
-        result.gamma_hedge_unit = gamma_hedge_unit
-
-        action_space = [0,gamma_action_bound]
-
-        # === Vega hedge ===
-        if FLAGS.vega_obs:
-            vega_hedge_unit = hed_port.get_vega(t, position_scale=False, single_value=True) # vega for swaption to be traded
-            portfolio_vega = self.portfolio.get_vega_local_hed(t) 
-
-            vega_action_bound = -portfolio_vega / (vega_hedge_unit)
-            action_space.append(vega_action_bound)
+        vega_hedge_unit = hed_port.get_vega(t, position_scale=False, single_value=True) # vega for swaption to be traded
+        portfolio_vega = self.portfolio.get_vega_local_hed(t) 
 
 
 
 
-        # === Hedge scaling from normalized action ===
-        low_val = np.min(action_space)
-        high_val = np.max(action_space)
-        result.bound_low = low_val
-        result.bound_high = high_val
+
+        gamma_hedge_ratio = _safe_div(-portfolio_gamma, gamma_hedge_unit)
+        vega_action_bound  = _safe_div(-portfolio_vega , vega_hedge_unit) if FLAGS.vega_obs else 0.0
+        action_space = [0, gamma_hedge_ratio, vega_action_bound]
+
+        action_space = np.max(np.abs(action_space))
+
         #action_swaption_hedge = low_val + action[0] * (high_val - low_val)
-        action_swaption_hedge =  action[0] * gamma_action_bound # counter hedge risk direction
-        #if t == 0:
-        #    print(f"gamma_bound: {gamma_action_bound:.3f}, hed_action: {action[0]:.3f}, hedge: {action_swaption_hedge:.3f}")
-        
+        action_swaption_hedge =  over_hedge_scale*action[0] * gamma_hedge_ratio # counter hedge risk direction
 
-
-
-        # === Delta hedge ===
-        
         delta_hedge_unit = hed_port.get_delta(t, position_scale=False, single_value=True) # delta for swaption to be traded
-        delta_liab_unit = liab_port.get_delta(t, position_scale=False, single_value=True) # delta for swaption to be traded
 
 
         # action[1] bound
         # delta that is added by the hedging swaption
         delta_swaption_offset_hed =  delta_hedge_unit * action_swaption_hedge # delta added by the swaption traded in this period
-        # effect of the hedging swaptions
-        # NOTE: no need to add the sensitivity to the swaption as it is already accounted for since the transaction happens before the hedge
-        #delta_hed_liab_unit_sensitivity = self.portfolio.get_hed_liab_relative_sensitivity(delta_liab_unit) # sensitivity to the added delta from the hedging swaption
-        delta_hed_local = self.portfolio.get_delta_local_hed(t)
-        # total delta from hedging portfolio
-        delta_hed_total = delta_hed_local + delta_swaption_offset_hed #+ delta_hed_liab_unit_sensitivity
-        
-        
-        action_swap_hedge =  -action[1] * delta_hed_total/self.portfolio.underlying.active_path_hed[t, t, SwapKeys.DELTA] # divide to scale by the delta sensitivity of the underlying
 
-        # action[2] bound
-        # NOTE: the delta liab as added already, and accounted for in the get_delta_local_liab
-        #delta_swaption_offset_liab = delta_liab_unit # delta added by the swaption traded in this period
+        delta_hed_local = self.portfolio.get_delta_local_hed(t)
+        delta_hed_total = delta_hed_local + delta_swaption_offset_hed 
+        
+        
+ 
         delta_liab_local = self.portfolio.get_delta_local_liab(t)
+        
+        
         delta_liab_hed_unit_sensitivity = self.portfolio.get_hed_liab_relative_sensitivity(delta_hedge_unit) # sensitivity to the added delta from the hedging swaption
         delta_liab_total = delta_liab_local + delta_liab_hed_unit_sensitivity  # local delta + delta from liab
-        action_swap_liab =  -action[2] * delta_liab_total/self.portfolio.underlying.active_path_liab[t, t, SwapKeys.DELTA] # divide to scale by the delta sensitivity of the underlying
+       
+
 
         
+
+        action_swap_hedge = -over_hedge_scale * action[1] * _safe_div(
+            delta_hed_total,
+            self.portfolio.underlying.active_path_hed[self.t, self.t, SwapKeys.DELTA])
+
+        action_swap_liab = -over_hedge_scale * action[2] * _safe_div(
+            delta_liab_total,
+            self.portfolio.underlying.active_path_liab[self.t, self.t, SwapKeys.DELTA])
         
-        # current prices at t
-        result.gamma_before_hedge = copy.deepcopy(self.portfolio.get_gamma(self.t))
-
-        result.vega_before_hedge = self.portfolio.get_vega(self.t)
-        result.hed_port_gamma_before = self.portfolio.hed_port.get_gamma(self.t)
-        result.liab_port_gamma_before = self.portfolio.liab_port.get_gamma(self.t)
-
-        #if t == 0:
-        #    print(f"position before hedge: {self.portfolio.hed_port.get_current_position(t)}")
-
-        result.step_pnl = reward = self.portfolio.step(action_swaption_hed=action_swaption_hedge,
-                                                        action_swap_hed=action_swap_hedge,
-                                                        action_swap_liab=action_swap_liab, 
-                                                        t=self.t, 
-                                                        result=result)
-        result.gamma_after_hedge = self.portfolio.get_gamma(self.t)
-        #assert abs(result.gamma_after_hedge - (result.gamma_before_hedge + result.gamma_hedge_unit * result.action_swaption_hed)) < 1e-6\
-        #    , (result.gamma_after_hedge, result.gamma_before_hedge, result.gamma_hedge_unit , result.action_swaption_hed)
-
-        #if t == 0:
-        #    print(f"position after hedge : {self.portfolio.hed_port.get_current_position(t)}\n")
-        result.vega_after_hedge = self.portfolio.get_vega(self.t)
+        
+        result.bound_low = low_val
+        result.bound_high = high_val
+        result.step_pnl = reward = self.portfolio.step(
+            action_swaption_hed=action_swaption_hedge,
+            action_swap_hed=action_swap_hedge,
+            action_swap_liab=action_swap_liab,
+            t=self.t,
+            result=result,
+        )
+  
         
         self.t = self.t + 1
 
@@ -307,21 +237,7 @@ class TradingEnv(gym.Env):
         else:
             done = False
         
-        result.state_price_hed = state[0]
-        result.state_price_liab = state[1]
-        result.state_delta = state[2]
-        result.state_delta_local_hed = state[3]
-        result.state_delta_local_liab = state[4]
-        result.state_hed_delta = state[5]
-        result.state_liab_delta = state[6]
-        result.state_gamma = state[7]
-        result.state_gamma_local = state[8]
-        result.state_hed_gamma = state[9]
 
-        if FLAGS.vega_obs:
-            result.state_vega = state[10]
-            result.state_vega_local = state[11]
-            result.state_hed_vega = state[12]
         # TODO: look into this, it might be slowing down the code
         # for other info later
         info = {"path_row": self.sim_episode}

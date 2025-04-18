@@ -25,6 +25,8 @@ from absl import app
 from absl import flags
 from collections import OrderedDict
 import dataclasses
+import datetime
+
 def ordered_asdict(obj):
     return OrderedDict((f.name, getattr(obj, f.name)) for f in dataclasses.fields(obj))
 
@@ -61,9 +63,12 @@ flags.DEFINE_integer('eval_seed', 1234, 'Evaluation Seed (Default 1234)')
 flags.DEFINE_boolean('gbm', False, 'GBM (Default False)')
 flags.DEFINE_boolean('sabr', False, 'SABR (Default False)')
 
+TS = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+RUN_FOLDER = f"/run_{TS}"
 def make_logger(work_folder, label, terminal=False):
+    
     loggers = [
-        log_utils.CSVLogger(f'./logs/{work_folder}', label=label, add_uid=False)
+        log_utils.CSVLogger(f'./logs/{RUN_FOLDER}/{work_folder}', label=label, add_uid=False)
     ]
     if terminal:
         loggers.append(log_utils.TerminalLogger(label=label))
@@ -251,9 +256,13 @@ def make_iqn_networks(
         'observation': observation_network,
     }
 
-def save_policy(policy_network,checkpoint_folder):
+def save_policy(policy_network, checkpoint_folder):
+    
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     snapshot = make_snapshot(policy_network)
-    tf.saved_model.save(snapshot, checkpoint_folder+'/policy')
+    save_path = f"{checkpoint_folder}/policy_{timestamp}"
+    tf.saved_model.save(snapshot, save_path)
+    print(f"Policy saved to {save_path}")
 
 def load_policy(policy_network, checkpoint_folder):
     trainable_variables_snapshot = {}
@@ -318,13 +327,13 @@ def main(argv):
     if not FLAGS.eval_only:
         train_loop = acme.EnvironmentLoop(environment, agent, label='train_loop', logger=loggers['train_loop'])
         train_loop.run(num_episodes=FLAGS.train_sim)    
-        save_policy(agent._learner._policy_network, f'./logs/{work_folder}')
+        save_policy(agent._learner._policy_network, f'./{RUN_FOLDER}/logs/{work_folder}')
 
     # Create the evaluation policy.
     if FLAGS.eval_only:
         policy_net = agent._learner._policy_network
         if FLAGS.agent_path == '':
-            load_policy(policy_net, f'./logs/{work_folder}')
+            load_policy(policy_net, f'./{RUN_FOLDER}/logs/{work_folder}')
         else:
             load_policy(policy_net, FLAGS.agent_path)
         eval_policy = snt.Sequential([
@@ -351,7 +360,7 @@ def main(argv):
     eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])
     eval_loop.run(num_episodes=FLAGS.eval_sim)   
     print("Successfully finished.")
-    Path(f'./logs/{work_folder}/ok').touch()
+    Path(f'./{RUN_FOLDER}/logs/{work_folder}/ok').touch()
 
 if __name__ == '__main__':
     app.run(main)
