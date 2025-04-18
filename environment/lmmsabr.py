@@ -774,7 +774,7 @@ def get_swap_matrix(f_sim, shape, resolution, tau, tenor, df, expiry_max=1, expi
         raise IndexError("Computed forward indices exceed available f_sim columns.")
 
     # Compute ZCB indices needed for annuity weights
-    zcb_offsets = np.arange(1,n_payments+1, dtype=np.float32) * resolution
+    zcb_offsets = np.arange(1,n_payments+1) * resolution
     zcb_indices = n_swaps[:, None] + zcb_offsets[None, :]
     if np.any(zcb_indices >= len(zcbs)):
         raise IndexError("Computed ZCB indices exceed available zcb entries.")
@@ -1063,12 +1063,12 @@ class LMMSABR:
         
     ):
         self.samples = None
-        self.tau = np.float32(tau)
-        self.resolution = np.int32(resolution)
-        self.dt = np.float32(tau / resolution)
-        self.beta = np.float32(beta)
-        self.B = np.float32(B)
-        self.sim_time = np.float32(sim_time)
+        self.tau = tau
+        self.resolution = resolution
+        self.dt = tau / resolution
+        self.beta = beta
+        self.B = B
+        self.sim_time = sim_time
         self.primed = False
         # swap params
         self.prime_swap_data(swap_hedge_expiry, swap_client_expiry, tenor)
@@ -1078,8 +1078,8 @@ class LMMSABR:
             self.t_max = self.max_swap_expiry + tenor + self.sim_time
         else:
             self.t_max = t_max
-        self.t_max = np.float32(self.t_max)
-        self.t_arr = np.linspace(0, self.t_max, int(self.t_max/self.dt +1), dtype=np.float32)
+        self.t_max = self.t_max
+        self.t_arr = np.linspace(0, self.t_max, int(self.t_max/self.dt +1))
         ttm_mat = self.t_arr[None, :] - self.t_arr[:,None]
         self.ttm_mat = ttm_mat
         self.swap_indexer, self.swap_indices = make_swap_indexer(n_steps = len(self.t_arr), swap_idxs = self.swap_idxs,resolution=self.resolution, tau=tau, tenor=self.tenor,expiry=self.max_swap_expiry, return_indices=True)
@@ -1518,7 +1518,7 @@ class LMMSABR:
         self.f_sim = np.full((self.n_steps, len(f_0)), np.nan)
         self.k_mat = np.full_like(self.f_sim, np.nan)
         self.f_sim[0] = f_0   # temporary adjustment
-        self.k_mat[0] = np.ones_like(f_0, dtype=np.float32)
+        self.k_mat[0] = np.ones_like(f_0)
 
         self._simulate_forward_dynamics()
         self._interpolate_vol()  # ex-post interpolation of vol
@@ -1858,7 +1858,7 @@ class LMMSABR:
         fig = plt.figure(figsize=(10, 8))
         ax = fig.add_subplot(111, projection='3d')
         # Create mesh grid the shape of self.swap_sim
-        X = np.arange(mat.shape[0], dtype=np.float32)*self.dt
+        X = np.arange(mat.shape[0])*self.dt
         Y = np.arange(mat.shape[1])
         X, Y = np.meshgrid(X, Y)
         Z = mat.T
@@ -1874,7 +1874,6 @@ class LMMSABR:
     
     
 
-
     def generate_episodes(
         self,
         n_episodes: int = 1000,
@@ -1883,40 +1882,42 @@ class LMMSABR:
         out_dir: str = "data/swaption_memmap"
     ) -> str:
         """
-        Stream-generate `n_episodes` into five .dat files under `out_dir`, with a tqdm
-        progress bar and a final pickle of `self.lmm` for later reuse.
+        Stream-generate `n_episodes` into five .dat files under `out_dir`,
+        ensuring all data is saved as float32, with a tqdm progress bar and
+        a final pickle of the model.
         """
         # prepare output directory
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         assert self.primed, "You must call prime() before generating episodes."
-        # 1) sample one episode to get dtype & per-episode shapes
+
+        # 1) sample one episode to get per-episode shapes
         self.simulate(seed=0)
         self.get_swap_matrix()
         (h0_sh, h0_sw), (l0_sh, l0_sw) = self.get_sabr_params()
-        T     = self.swap_sim_shape[0]
-        print(T)
-        dtype = h0_sh.dtype
+        T = self.swap_sim_shape[0]
+
+        # Force saving dtype to float32
+        save_dtype = np.float32
         shape6 = (T, T, h0_sh.shape[-1])   # = (T, T, 6)
         shape5 = (T, T, h0_sw.shape[-1])   # = (T, T, 5)
 
-        # 2) create (or overwrite) five memmap files at full size
-        total6  = (n_episodes, *shape6)
-        total5  = (n_episodes, *shape5)
-        total_nd = (n_episodes, T, T)
-
-        # Create a timestamped subdirectory
+        # 2) create timestamped subdirectory
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         timestamped_out_dir = f"{out_dir}/{timestamp}"
         Path(timestamped_out_dir).mkdir(parents=True, exist_ok=True)
 
-        mm_h   = np.memmap(f"{timestamped_out_dir}/swaption_hed.dat",   mode="w+", dtype=dtype, shape=total6)
-        mm_l   = np.memmap(f"{timestamped_out_dir}/swaption_liab.dat", mode="w+", dtype=dtype, shape=total6)
-        mm_hs  = np.memmap(f"{timestamped_out_dir}/swap_hedge.dat",     mode="w+", dtype=dtype, shape=total5)
-        mm_ls  = np.memmap(f"{timestamped_out_dir}/swap_liab.dat",      mode="w+", dtype=dtype, shape=total5)
-        mm_nd  = np.memmap(f"{timestamped_out_dir}/net_direction.dat",  mode="w+", dtype=dtype, shape=total_nd)
+        # 3) pre-allocate memmap files with float32 dtype
+        total6   = (n_episodes, *shape6)
+        total5   = (n_episodes, *shape5)
+        total_nd = (n_episodes, T, T)
 
+        mm_h   = np.memmap(f"{timestamped_out_dir}/swaption_hed.dat",   mode="w+", dtype=save_dtype, shape=total6)
+        mm_l   = np.memmap(f"{timestamped_out_dir}/swaption_liab.dat", mode="w+", dtype=save_dtype, shape=total6)
+        mm_hs  = np.memmap(f"{timestamped_out_dir}/swap_hedge.dat",     mode="w+", dtype=save_dtype, shape=total5)
+        mm_ls  = np.memmap(f"{timestamped_out_dir}/swap_liab.dat",      mode="w+", dtype=save_dtype, shape=total5)
+        mm_nd  = np.memmap(f"{timestamped_out_dir}/net_direction.dat",  mode="w+", dtype=save_dtype, shape=total_nd)
 
-        # 3) loop over episodes in blocks, with tqdm
+        # 4) loop over episodes in blocks, with tqdm
         for start in tqdm(range(0, n_episodes, block),
                           desc="Generating episode blocks",
                           unit="block"):
@@ -1924,18 +1925,18 @@ class LMMSABR:
 
             # generate net_direction for this block
             pd = np.random.poisson(lam=poisson_rate, size=(b, T))[:, None, :]
-            num_pos  = np.random.binomial(pd, 0.5)
+            num_pos = np.random.binomial(pd, 0.5)
             nd_block = 2 * num_pos - pd
             iu = np.triu_indices(T, k=1)
-            nd_block = np.tile(nd_block, (1,T, 1)) 
+            nd_block = np.tile(nd_block, (1, T, 1))
             nd_block[:, iu[0], iu[1]] = 0
-            nd_block = np.nan_to_num(nd_block).astype(dtype)
+            nd_block = np.nan_to_num(nd_block).astype(save_dtype)
 
-            # prepare in‑RAM buffers
-            hd_b = np.empty((b, *shape6), dtype=dtype)
-            ld_b = np.empty((b, *shape6), dtype=dtype)
-            hs_b = np.empty((b, *shape5), dtype=dtype)
-            ls_b = np.empty((b, *shape5), dtype=dtype)
+            # prepare in‑RAM buffers as float32
+            hd_b = np.empty((b, *shape6), dtype=save_dtype)
+            ld_b = np.empty((b, *shape6), dtype=save_dtype)
+            hs_b = np.empty((b, *shape5), dtype=save_dtype)
+            ls_b = np.empty((b, *shape5), dtype=save_dtype)
 
             # fill buffers
             for i in range(b):
@@ -1943,10 +1944,10 @@ class LMMSABR:
                 self.simulate(seed=ep_idx)
                 self.get_swap_matrix()
                 (h_sh, h_sw), (l_sh, l_sw) = self.get_sabr_params()
-                hd_b[i] = np.nan_to_num(h_sh)
-                ld_b[i] = np.nan_to_num(l_sh)
-                hs_b[i] = np.nan_to_num(h_sw)
-                ls_b[i] = np.nan_to_num(l_sw)
+                hd_b[i] = np.nan_to_num(h_sh).astype(save_dtype)
+                ld_b[i] = np.nan_to_num(l_sh).astype(save_dtype)
+                hs_b[i] = np.nan_to_num(h_sw).astype(save_dtype)
+                ls_b[i] = np.nan_to_num(l_sw).astype(save_dtype)
 
             # write and flush this block
             mm_h  [start:start+b] = hd_b
@@ -1961,11 +1962,11 @@ class LMMSABR:
             mm_ls.flush()
             mm_nd.flush()
 
-        # 4) pickle the LMMModel itself for later reuse
-        pickle_path = Path(timestamped_out_dir) / "lmm_model.pkl"
+        # 5) pickle the LMMModel state for later reuse
+        pickle_path = Path(timestamped_out_dir) / "lmm_samples.pkl"
         with open(pickle_path, "wb") as f:
             pickle.dump(self.samples, f)
 
         print(f"All episodes streamed to disk in '{timestamped_out_dir}'.")
-        print(f"LMMModel object saved to '{pickle_path}'.")
+        print(f"LMMM samples list of dicts saved to '{pickle_path}'.")
         return timestamped_out_dir
