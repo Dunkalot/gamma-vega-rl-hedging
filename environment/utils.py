@@ -48,7 +48,7 @@ class Utils:
             swap_hedge_expiry=swap_hedge_expiry,
             swap_client_expiry=swap_client_expiry
         )
-        self.contract_size = np.float32(1000)
+        self.contract_size = np.float32(100)
         self.swap_spread = np.float32(swap_spread)
         self.spread = np.float32(spread)
         self.poisson_rate = poisson_rate
