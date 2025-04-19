@@ -189,10 +189,10 @@ def make_networks(
 
 def make_quantile_networks(
     action_spec: specs.BoundedArray,
-    #policy_layer_sizes: Sequence[int] = (256, 256, 256), # (64, 64)
-    policy_layer_sizes: Sequence[int] = (16, 32),
-    #critic_layer_sizes: Sequence[int] =  (512, 512, 256),
-    critic_layer_sizes: Sequence[int] =  (32, 32),
+    policy_layer_sizes: Sequence[int] = (256, 256, 256), # (64, 64)
+    #policy_layer_sizes: Sequence[int] = (16, 32),
+    critic_layer_sizes: Sequence[int] =  (512, 512, 256),
+    #critic_layer_sizes: Sequence[int] =  (32, 32),
     quantile_interval: float = 0.01, 
     time_embedding_dim: int = 16,dt =1/52
     ) -> Mapping[str, types.TensorTransformation]:
