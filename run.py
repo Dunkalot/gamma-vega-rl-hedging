@@ -327,13 +327,13 @@ def main(argv):
     if not FLAGS.eval_only:
         train_loop = acme.EnvironmentLoop(environment, agent, label='train_loop', logger=loggers['train_loop'])
         train_loop.run(num_episodes=FLAGS.train_sim)    
-        save_policy(agent._learner._policy_network, f'./{RUN_FOLDER}/logs/{work_folder}')
+        save_policy(agent._learner._policy_network, f'./logs/{RUN_FOLDER}/{work_folder}')
 
     # Create the evaluation policy.
     if FLAGS.eval_only:
         policy_net = agent._learner._policy_network
         if FLAGS.agent_path == '':
-            load_policy(policy_net, f'./{RUN_FOLDER}/logs/{work_folder}')
+            load_policy(policy_net, f'./logs/{RUN_FOLDER}/{work_folder}')
         else:
             load_policy(policy_net, FLAGS.agent_path)
         eval_policy = snt.Sequential([
@@ -360,7 +360,7 @@ def main(argv):
     eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])
     eval_loop.run(num_episodes=FLAGS.eval_sim)   
     print("Successfully finished.")
-    Path(f'./{RUN_FOLDER}/logs/{work_folder}/ok').touch()
+    Path(f'./logs/{RUN_FOLDER}/{work_folder}/ok').touch()
 
 if __name__ == '__main__':
     app.run(main)

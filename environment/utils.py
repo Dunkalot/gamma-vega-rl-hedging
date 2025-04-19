@@ -3,8 +3,8 @@ import random
 import gc
 import numpy as np
 import psutil
-
-
+import os
+import glob
 from absl import flags
 FLAGS = flags.FLAGS
 import numpy as np
@@ -25,12 +25,21 @@ class Utils:
         sim_time = 1,
         t_max=None,
         beta=0.5,
-        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42):
+        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42, swap_spread =0.0001):
+        
         self.seed = seed
+
+        self.out_dir = "data/swaption_memmap"
+        
+        
+        
         print(f"utils initiated with {spread=}, {poisson_rate=}, {n_episodes=}")
         
         print(f"\nMemory usage before lmm: {psutil.Process().memory_info().rss / 1e6:.2f} MB")
+        self.swap_spread = swap_spread
 
+        
+        self.contract_size = 1
         self.spread = spread
         self.poisson_rate = poisson_rate
         self.n_episodes = n_episodes
@@ -44,6 +53,9 @@ class Utils:
             swap_hedge_expiry=swap_hedge_expiry,
             swap_client_expiry=swap_client_expiry
         )
+        self.swap_shape = self.lmm.swap_sim_shape
+        self.hed_greeks = 6
+        self.swap_dims = 5
         self.dt = self.lmm.dt
 
         self.num_period = self.lmm.swap_sim_shape[0] # number of steps
@@ -51,14 +63,68 @@ class Utils:
 
 
     def generate_swaption_market_data(self):
-        df_fwd = compute_6m_forward_dataframe(make_nss_yield_df())
-        print("sampling starting conditions...")
-        self.lmm.sample_starting_conditions(df_fwd, curve_samples=np.minimum(self.n_episodes,len(df_fwd)))
-        print("priming the initial state...")
-        self.lmm.prime()
-        hedge_swaption, liab_swaption, hedge_swap, liab_swap, net_direction = self.lmm.generate_episodes(self.n_episodes)
+        """
+        Load swaption market episodes from disk directory `out_dir`.
 
-        del self.lmm
-        gc.collect()
-        return hedge_swaption, liab_swaption, hedge_swap, liab_swap, net_direction
-    
+        Assumes files named:
+        - swaption_hed.dat   -> shape (n_episodes, T, T, hed_greeks)
+        - swaption_liab.dat  -> same as above
+        - swap_hedge.dat     -> shape (n_episodes, T, T, swap_dims)
+        - swap_liab.dat      -> same as above
+        - net_direction.dat  -> shape (n_episodes, T, T)
+
+        Args:
+            out_dir (str): path containing the .dat files or timestamped subdir.
+            n_episodes (int): number of episodes.
+            swap_shape (tuple): (T, T) shape of time/time.
+            hed_greeks (int): number of greeks in swaption data (e.g. 6).
+            swap_dims (int): number of dims in swap data (e.g. 5).
+        Returns:
+            tuple[np.memmap]: (hedge_swaption_mm, liab_swaption_mm,
+                                hedge_swap_mm,   liab_swap_mm,
+                                net_direction_mm)
+        """
+        out_dir = self.out_dir
+        n_episodes = self.n_episodes
+        swap_shape = self.swap_shape
+        hed_greeks = self.hed_greeks
+        swap_dims = self.swap_dims  
+        # If out_dir has subdirectories, pick latest timestamp
+        candidates = sorted(glob.glob(os.path.join(out_dir, '*')))
+        data_dir = candidates[-1] if os.path.isdir(candidates[-1]) else out_dir
+
+        T1, T2 = swap_shape[0], swap_shape[0] # hedge and liability are split into two square matrices
+        # Load memmaps with known shapes and dtype float32
+        hedge_swaption_mm = np.memmap(
+            os.path.join(data_dir, 'swaption_hed.dat'),
+            dtype=np.float32, mode='r',
+            shape=(n_episodes, T1, T2, hed_greeks)
+        )
+        liab_swaption_mm = np.memmap(
+            os.path.join(data_dir, 'swaption_liab.dat'),
+            dtype=np.float32, mode='r',
+            shape=(n_episodes, T1, T2, hed_greeks)
+        )
+        hedge_swap_mm = np.memmap(
+            os.path.join(data_dir, 'swap_hedge.dat'),
+            dtype=np.float32, mode='r',
+            shape=(n_episodes, T1, T2, swap_dims)
+        )
+        liab_swap_mm = np.memmap(
+            os.path.join(data_dir, 'swap_liab.dat'),
+            dtype=np.float32, mode='r',
+            shape=(n_episodes, T1, T2, swap_dims)
+        )
+        net_direction_mm = np.memmap(
+            os.path.join(data_dir, 'net_direction.dat'),
+            dtype=np.float32, mode='r',
+            shape=(n_episodes, T1, T2)
+        )
+        return (
+            hedge_swaption_mm,
+            liab_swaption_mm,
+            hedge_swap_mm,
+            liab_swap_mm,
+            net_direction_mm
+        )
+        
