@@ -36,13 +36,8 @@ class Utils:
         print(f"utils initiated with {spread=}, {poisson_rate=}, {n_episodes=}")
         
         print(f"\nMemory usage before lmm: {psutil.Process().memory_info().rss / 1e6:.2f} MB")
-        self.swap_spread = swap_spread
 
         
-        self.contract_size = 1
-        self.spread = spread
-        self.poisson_rate = poisson_rate
-        self.n_episodes = n_episodes
         self.lmm:LMMSABR = LMMSABR(tau=tau,
             resolution=resolution,
             tenor=tenor,
@@ -53,14 +48,20 @@ class Utils:
             swap_hedge_expiry=swap_hedge_expiry,
             swap_client_expiry=swap_client_expiry
         )
+        self.contract_size = np.float32(1000)
+        self.swap_spread = np.float32(swap_spread)
+        self.spread = np.float32(spread)
+        self.poisson_rate = poisson_rate
+        self.n_episodes = n_episodes
         self.swap_shape = self.lmm.swap_sim_shape
         self.hed_greeks = 6
         self.swap_dims = 5
-        self.dt = self.lmm.dt
+        self.dt = np.float32(self.lmm.dt)
 
         self.num_period = self.lmm.swap_sim_shape[0] # number of steps
         print(f"Memory usage after: {psutil.Process().memory_info().rss / 1e6:.2f} MB\n")
-
+        gc.collect()
+        print(f"Memory usage after gc: {psutil.Process().memory_info().rss / 1e6:.2f} MB\n")
 
     def generate_swaption_market_data(self):
         """

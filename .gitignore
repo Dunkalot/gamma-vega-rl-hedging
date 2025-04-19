@@ -4,3 +4,5 @@
 environment/__pycache__/**
 
 /data/** 
+
+/backup_runs/**

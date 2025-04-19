@@ -14,12 +14,7 @@ import numpy as np
 
 from environment.Trading import MainPortfolio, Greek, SwapKeys
 
-def _safe_div(num, den, default=0.0):
-    # 1) elementwise division (possibly INF/NAN) in C
-    # 2) nan/±inf→default in C
-    with np.errstate(divide='ignore', invalid='ignore'):
-        raw = num / den
-    return np.nan_to_num(raw, nan=default, posinf=default, neginf=default)
+
 
 @dataclasses.dataclass
 class StepResult:
@@ -120,6 +115,7 @@ class TradingEnv(gym.Env):
         result.action2_swap_hed = action[2]
         result.action3_swap_liab = action[3]
         if self.print_nanwarning and np.isnan(action).any():
+            self.print_nanwarning = False
             print(f"action is NaN! This warning is turned off until next episode")
         over_hedge_scale = 1.5
         t = self.t
@@ -134,21 +130,10 @@ class TradingEnv(gym.Env):
         vega_hedge_unit = hed_port.get_vega(t, position_scale=False, single_value=True) # vega for swaption to be traded
         portfolio_vega = self.portfolio.get_vega_local_hed(t) 
 
+        gamma_hedge_ratio = np.divide(portfolio_gamma, gamma_hedge_unit * self.utils.contract_size)
+        vega_hedge_ratio  = np.divide(portfolio_vega , vega_hedge_unit * self.utils.contract_size) if FLAGS.vega_obs else np.float32(0.0)
 
 
-
-
-        
-
-        tol = 1e-8
-
-
-        # 2) Now compute the ratios safely
-        gamma_hedge_ratio = _safe_div(portfolio_gamma, gamma_hedge_unit)
-        vega_hedge_ratio  = _safe_div(portfolio_vega , vega_hedge_unit) if FLAGS.vega_obs else 0.0
-        # 3) Check if the *exposures* are effectively zero
-        
-        
         hedge_direction =  -(action[0] * gamma_hedge_ratio + (1 - action[0]) * vega_hedge_ratio)
 
         hedge_magnitude = over_hedge_scale * action[1]
@@ -173,17 +158,9 @@ class TradingEnv(gym.Env):
         delta_liab_total = delta_liab_local + delta_liab_hed_unit_sensitivity  # local delta + delta from liab
        
 
+        action_swap_hedge = -over_hedge_scale * action[2] *  delta_hed_total/ (self.portfolio.underlying.active_path_hed[self.t, self.t, SwapKeys.DELTA] * self.utils.contract_size)
 
-        
-
-        action_swap_hedge = -over_hedge_scale * action[2] * _safe_div(
-            delta_hed_total,
-            self.portfolio.underlying.active_path_hed[self.t, self.t, SwapKeys.DELTA])
-
-        action_swap_liab = -over_hedge_scale * action[3] * _safe_div(
-            delta_liab_total,
-            self.portfolio.underlying.active_path_liab[self.t, self.t, SwapKeys.DELTA])
-        
+        action_swap_liab = -over_hedge_scale * action[3] * delta_liab_total/ (self.portfolio.underlying.active_path_liab[self.t, self.t, SwapKeys.DELTA] * self.utils.contract_size)
         
         
         # ============================================================================
@@ -196,11 +173,11 @@ class TradingEnv(gym.Env):
 
         result.gamma_before_hedge = portfolio_gamma
         result.vega_before_hedge = portfolio_vega
-        
+
         result.step_pnl = reward = self.portfolio.step(
-            action_swaption_hed=action_swaption_hedge,
-            action_swap_hed=action_swap_hedge,
-            action_swap_liab=action_swap_liab,
+            action_swaption_hed=np.float32(action_swaption_hedge),
+            action_swap_hed=np.float32(action_swap_hedge),
+            action_swap_liab=np.float32(action_swap_liab),
             t=self.t,
             result=result,
         )
@@ -208,10 +185,10 @@ class TradingEnv(gym.Env):
         result.delta_local_liab_after_hedge = self.portfolio.get_delta_local_liab(t)
         result.delta_after_hedge = self.portfolio.get_delta(t)
 
-
         result.gamma_after_hedge = self.portfolio.get_gamma_local_hed(t)
         result.vega_after_hedge = self.portfolio.get_vega_local_hed(t)
   
+        
         
         self.t = self.t + 1
 
@@ -224,8 +201,6 @@ class TradingEnv(gym.Env):
             done = False
         
 
-        # TODO: look into this, it might be slowing down the code
-        # for other info later
         info = {"path_row": self.sim_episode}
         if self.logger:
             self.logger.write(dataclasses.asdict(result))

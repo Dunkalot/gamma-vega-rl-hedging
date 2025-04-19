@@ -30,6 +30,10 @@ import datetime
 def ordered_asdict(obj):
     return OrderedDict((f.name, getattr(obj, f.name)) for f in dataclasses.fields(obj))
 
+print("SETTING FLOAT PRECISION TO 32")
+
+tf.keras.backend.set_floatx('float32')
+
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('train_sim', 40_000, 'train episodes (Default 40_000)')
 flags.DEFINE_integer('eval_sim', 5_000, 'evaluation episodes (Default 40_000)')
@@ -185,11 +189,13 @@ def make_networks(
 
 def make_quantile_networks(
     action_spec: specs.BoundedArray,
-    policy_layer_sizes: Sequence[int] = (256, 256, 256),
-    critic_layer_sizes: Sequence[int] = (512, 512, 256),
+    #policy_layer_sizes: Sequence[int] = (256, 256, 256), # (64, 64)
+    policy_layer_sizes: Sequence[int] = (16, 32),
+    #critic_layer_sizes: Sequence[int] =  (512, 512, 256),
+    critic_layer_sizes: Sequence[int] =  (32, 32),
     quantile_interval: float = 0.01, 
     time_embedding_dim: int = 16,dt =1/52
-) -> Mapping[str, types.TensorTransformation]:
+    ) -> Mapping[str, types.TensorTransformation]:
     """Creates the networks used by the agent."""
 
     # Get total number of action dimensions from action spec.
@@ -228,8 +234,8 @@ def make_iqn_networks(
     action_spec: specs.BoundedArray,
     cvar_th: float,
     n_cos=64, n_tau=8, n_k=32,
-    policy_layer_sizes: Sequence[int] = (256, 256, 256),
-    critic_layer_sizes: Sequence[int] = (512, 512, 256),
+    policy_layer_sizes: Sequence[int] = (64, 64), # (256, 256, 256)
+    critic_layer_sizes: Sequence[int] = (128, 128), # (512, 512, 256)
     quantile_interval: float = 0.01
 ) -> Mapping[str, types.TensorTransformation]:
     """Creates the networks used by the agent."""

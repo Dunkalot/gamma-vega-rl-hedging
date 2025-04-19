@@ -341,7 +341,7 @@ class D4PG(agent.Agent):
                 clipping=clipping,
                 replay_table_name=replay_table_name,
             ))
-
+        print("policy internal network dimensions: ", policy_network)
         # TODO(mwhoffman): pass the network dataclass in directly.
         online_networks = D4PGNetworks(policy_network=policy_network,
                                        critic_network=critic_network,
