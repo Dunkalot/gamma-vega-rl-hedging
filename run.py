@@ -103,24 +103,133 @@ def make_environment(utils, logger = None) -> dm_env.Environment:
 
 
 
-def sinusoidal_time_embedding(t_years: tf.Tensor, dim: int) -> tf.Tensor:
-    assert dim % 2 == 0
-    i = tf.range(dim//2, dtype=tf.float32)
-    freqs = 1.0 / (10000.0 ** (2 * i / dim))
-    angles = t_years * freqs  # now t_years∈[0,4], freqs span slow→fast
-    return tf.concat([tf.sin(angles), tf.cos(angles)], -1)
+def sinusoidal_time_embedding(
+    t_years: tf.Tensor,
+    dim: int,
+    base: float = 100.0,
+    scale: float = 2 * np.pi
+) -> tf.Tensor:
+    """
+    t_years: [...,1] or [...] float32 tensor in [0,1] (fraction of year)
+    dim:     even integer, total embedding size
+    base:    controls decay of frequencies
+    scale:   overall multiplier (2π to wrap 1 cycle over t=1)
+    returns: [..., dim] float32 tensor
+    """
+    # make sure we have shape [...], not [...,1]
+    t = tf.cast(tf.squeeze(t_years, axis=-1), tf.float32)  # now shape [...]
+    half = dim // 2
+    # build [half] frequency vector
+    i = tf.cast(tf.range(half), tf.float32)
+    freqs = tf.pow(base, -2.0 * i / tf.cast(dim, tf.float32))  # [half]
+    # angles: broadcast to [..., half]
+    angles = tf.expand_dims(t, -1) * scale * freqs
+    sin_emb = tf.sin(angles)  # [..., half]
+    cos_emb = tf.cos(angles)  # [..., half]
+    emb = tf.concat([sin_emb, cos_emb], axis=-1)  # [..., dim]
+    return tf.cast(emb, tf.float32)
 
-def embed_time_observation(obs: tf.Tensor, time_dim: int = 16, dt=1/52) -> tf.Tensor:
-    # obs[..., :-3] holds everything but t,ttm_hed,ttm_liab
-    core, t_raw = obs[..., :-2], obs[..., -2:]
-    t_cont    = t_raw[..., 0:1] * dt     # in years
-    ttm_hed   = tf.clip_by_value(1.0 - t_cont, 0.0, 1.0)
-    ttm_liab  = tf.clip_by_value(2.0 - t_cont, 0.0, 2.0)
-    # embed both ttms
-    embed_hed  = sinusoidal_time_embedding(ttm_hed,  time_dim//2)
-    embed_liab = sinusoidal_time_embedding(ttm_liab, time_dim//2)
-    return tf.concat([core, embed_hed, embed_liab], -1)
+def embed_time_observation(obs: tf.Tensor, time_dim: int = 16, dt: float = 1/52) -> tf.Tensor:
+    # Split off the last element as the integer time index
+    core  = obs[..., :-1]               # all features except t
+    t_raw = obs[..., -1:]               # shape [...,1]
 
+    # Convert step index to continuous years
+    t_cont = tf.cast(t_raw, tf.float32) * dt  # now in [0, total_years]
+
+    # Sinusoidal embed into `time_dim` dims
+    t_embed = sinusoidal_time_embedding(t_cont, time_dim)
+
+    # Final observation vector
+    return tf.cast(tf.concat([core, t_embed], axis=-1), tf.float32)
+
+import numpy as np
+import sonnet as snt
+import tensorflow as tf
+import tensorflow_probability as tfp
+import matplotlib.pyplot as plt
+
+# Alias for bijectors
+tfb = tfp.bijectors
+
+class OneYearKernelLayer(snt.Module):
+    """
+    Sonnet module acting like a layer: takes a risk vector [T] and returns
+    a single exposure scalar. Internally computes trainable kernel weights
+    anchored at a fixed tenor (1y at index anchor_index).
+
+    Parameters a,b,c,d,eta,beta are constrained smoothly via Sigmoid bijectors,
+    with optional scaling ranges provided via init args.
+
+    Usage:
+        layer = OneYearKernelLayer(
+            anchor_index=52,
+            a_scale=0.2, b_scale=0.2, c_scale=1.5, d_scale=0.5,
+            eta_scale=0.95, beta_scale=0.5)
+        exposure = layer(risk_vector)
+    """
+    def __init__(self,
+                 anchor_index: int,
+                 tenor_grid: np.ndarray = None,
+                 init_params: dict = None,
+                 a_scale: float = 1.0,
+                 b_scale: float = 1.0,
+                 c_scale: float = 1.0,
+                 d_scale: float = 1.0,
+                 eta_scale: float = 1.0,
+                 beta_scale: float = 1.0,
+                 name: str = None):
+        super().__init__(name=name)
+        self.anchor_index = anchor_index
+        # Tenor grid default 0 to 3 years at 1/52 increments
+        if tenor_grid is None:
+            tau_vals = np.arange(0, 3, 1/52).astype(np.float32)
+        else:
+            tau_vals = np.array(tenor_grid, dtype=np.float32)
+        self.tau_grid = tf.constant(tau_vals, dtype=tf.float32)
+
+        # Default initial params
+        defaults = init_params or {
+            'a': 0.5, 'b': 0.5, 'c': 0.5, 'd': 0.001,
+            'eta': 0.5, 'beta': 0.5
+        }
+        # Build bijectors: sigmoid then scale
+        def make_bij(scale, shift=0.0):
+            chain = []
+            if shift != 0.0:
+                chain.append(tfb.Shift(shift))
+            # scale after sigmoid to map (0,1) -> (0,scale)
+            chain.append(tfb.Scale(scale))
+            chain.append(tfb.Sigmoid())
+            return tfb.Chain(chain)
+
+        # Create trainable TransformedVariables
+        self.a = tfp.util.TransformedVariable(
+            defaults['a'], bijector=make_bij(a_scale), name='a')
+        self.b = tfp.util.TransformedVariable(
+            defaults['b'], bijector=make_bij(b_scale), name='b')
+        self.c = tfp.util.TransformedVariable(
+            defaults['c'], bijector=make_bij(c_scale), name='c')
+        # For d, ensure minimum base level via shift
+        self.d = tfp.util.TransformedVariable(
+            defaults['d'], bijector=make_bij(d_scale, shift=0.001), name='d')
+        self.eta = tfp.util.TransformedVariable(
+            defaults['eta'], bijector=make_bij(eta_scale), name='eta')
+        self.beta = tfp.util.TransformedVariable(
+            defaults['beta'], bijector=make_bij(beta_scale), name='beta')
+
+    def _compute_weights(self) -> tf.Tensor:
+        tau = self.tau_grid
+        vols = (self.a + self.b * tau) * tf.exp(-self.c * tau) + self.d
+        vol_ref = vols[self.anchor_index]
+        tau_ref = tau[self.anchor_index]
+        time_dist = tf.abs(tau - tau_ref)
+        corr = self.eta + (1. - self.eta) * tf.exp(-self.beta * time_dist)
+        return corr * (vols / vol_ref)
+
+    def __call__(self, risk_vector: tf.Tensor) -> tf.Tensor:
+        weights = self._compute_weights()
+        return tf.reduce_sum(weights * risk_vector)
 
 
 
@@ -194,21 +303,17 @@ def make_quantile_networks(
     critic_layer_sizes: Sequence[int] =  (512, 512, 256),
     #critic_layer_sizes: Sequence[int] =  (32, 32),
     quantile_interval: float = 0.01, 
-    time_embedding_dim: int = 16,dt =1/52
     ) -> Mapping[str, types.TensorTransformation]:
     """Creates the networks used by the agent."""
 
     # Get total number of action dimensions from action spec.
     num_dimensions = np.prod(action_spec.shape, dtype=int)
 
+    vol_kernel = OneYearKernelLayer(a_scale=0.1, b_sclae=0.3, c_scale=1.5, d_scale = 0.1)
+    volvol_kernel = OneYearKernelLayer(a_scale=1.5, b_scale=0.3, c_scale=3, d_scale = 0.5)
 
-    
+    observation_network = tf2_utils.batch_concat
 
-
-    #Create the shared observation network; here simply a state-less operation.
-    def observation_network(obs: tf.Tensor, dt=dt) -> tf.Tensor:
-        return embed_time_observation(obs, time_embedding_dim)
-    #observation_network = tf2_utils.batch_concat
     # Create the policy network.
     policy_network = snt.Sequential([
         networks.LayerNormMLP(policy_layer_sizes, activate_final=True),

@@ -71,22 +71,22 @@ class Swaps(AssetInterface):
 
 
     def step_hed(self, t: int):
-        pnl_hed  = np.sum(self.active_path_hed [t, :, SwapKeys.PNL]  * self.position_hed * self.utils.contract_size)
+        pnl_hed  = np.sum(self.active_path_hed [t, :, SwapKeys.PNL]  * self.position_hed )
         return pnl_hed
     def step_liab(self, t: int):
-        pnl_liab = np.sum(self.active_path_liab[t, :, SwapKeys.PNL] * self.position_liab * self.utils.contract_size)
+        pnl_liab = np.sum(self.active_path_liab[t, :, SwapKeys.PNL] * self.position_liab )
         return pnl_liab
 
     def get_value(self, t: int) -> np.ndarray:
-        val_hed  = self.active_path_hed [t, t, SwapKeys.PRICE]  * self.position_hed * self.utils.contract_size
-        val_liab = self.active_path_liab[t, t, SwapKeys.PRICE] * self.position_liab * self.utils.contract_size
+        val_hed  = self.active_path_hed [t, t, SwapKeys.PRICE]  * self.position_hed
+        val_liab = self.active_path_liab[t, t, SwapKeys.PRICE] * self.position_liab 
         return np.array([val_hed, val_liab])
 
     def get_delta_vec(self, t: int):
-        vec_hed  = self.position_hed  * self.active_path_hed [:, :, SwapKeys.DELTA] * self.utils.contract_size
-        vec_liab = self.position_liab * self.active_path_liab[:, :, SwapKeys.DELTA] * self.utils.contract_size
-        return np.concatenate([vec_hed, vec_liab], axis=1)[t]
-
+        vec_hed  = self.position_hed[t,:]  * self.active_path_hed [t, :, SwapKeys.DELTA]
+        vec_liab = self.position_liab[t,:] * self.active_path_liab[t, :, SwapKeys.DELTA] 
+        swap_delta_vec = np.concatenate([vec_hed, vec_liab])
+        return swap_delta_vec
     def get_delta(self, t: int):    
         raise NotImplementedError("get_delta() not implemented for Swaps class. Use get_delta_vec() instead.")
 
@@ -103,12 +103,12 @@ class Swaps(AssetInterface):
         return self.active_path_liab[t, t, SwapKeys.RATE] * 100
 
     def add(self, t: int, action_swap_hed: float, action_swap_liab: float):
-        self.position_hed [:, t] = action_swap_hed
-        self.position_liab[:, t] = action_swap_liab
+        self.position_hed [t:, t] = action_swap_hed * self.utils.contract_size
+        self.position_liab[t:, t] = action_swap_liab * self.utils.contract_size
         price_hed  = self.active_path_hed [t, t, SwapKeys.PRICE]
         price_liab = self.active_path_liab[t, t, SwapKeys.PRICE]
-        cost_hed   = -abs(self.utils.swap_spread * price_hed  * action_swap_hed * self.utils.contract_size)
-        cost_liab  = -abs(self.utils.swap_spread * price_liab * action_swap_liab * self.utils.contract_size)
+        cost_hed   = -abs(self.utils.swap_spread * price_hed  * self.position_hed[t,t] )
+        cost_liab  = -abs(self.utils.swap_spread * price_liab * self.position_liab[t,t] )
         return cost_hed + cost_liab
 
     def get_position_hed(self, t: int):
@@ -142,10 +142,10 @@ class SwaptionPortfolio:
         self._base_options: np.ndarray = None  
         self._episode = None  
 
+        self.steps = utils.lmm.swap_sim_shape[0]
         # Per‐episode buffers (steps × swaps)
-        self._positions: np.ndarray = None  
-        self._active:    np.ndarray = None  
-
+        self._positions: np.ndarray = np.zeros((self.steps, self.steps), dtype=np.float32)
+        
     def reset(self):
         """Reset portfolio state within the current episode."""
         self._positions[:] = np.float32(0.0)
@@ -157,14 +157,8 @@ class SwaptionPortfolio:
         """
         self._episode = episode
 
-        # 1) materialize the 3‑D Greeks array for this episode
-        #    memmap[episode] is just a view; np.nan_to_num allocates a small in‑RAM copy
-        eps = self._base_memmap[episode]
-        self._base_options = eps  # shape: (steps, swaps, greeks)
+        self._base_options = self._base_memmap[episode]  # shape: (steps, swaps, greeks)
 
-        # 2) init your per‐episode state arrays to match (steps, swaps)
-        steps, swaps, _ = eps.shape
-        self._positions = np.zeros((steps, swaps), dtype=np.float32)
 
     def add(self, t: int, num_contracts: float):
         """
@@ -172,10 +166,10 @@ class SwaptionPortfolio:
         Must have called set_episode() already.
         """
         # mark for all future timesteps
-        self._positions[t:, t] = num_contracts
+        self._positions[t:, t] = num_contracts * self.utils.contract_size
 
         price = self._base_options[t, t, Greek.PRICE]
-        cost  = -abs(self.utils.spread * price * num_contracts * self.utils.contract_size)
+        cost  = -abs(self.utils.spread * price * self._positions[t, t] )
         return cost
 
     def get_metric(self, t: int, greek: int,
@@ -185,11 +179,11 @@ class SwaptionPortfolio:
         """Exactly as before, but no episode index anywhere."""
         if single_value:
             val   = self._base_options[t, t, greek]
-            scale = self._positions[t, t] * self.utils.contract_size if position_scale else np.float32(1.0)
+            scale = self._positions[t, t]  if position_scale else np.float32(1.0)
             return val * scale 
         else:
             vals  = self._base_options[t, :, greek]
-            scale = (self._positions[t, :] * self.utils.contract_size) if position_scale else np.float32(1.0)
+            scale = self._positions[t, :]  if position_scale else np.float32(1.0)
             out   = vals * scale
             return out.sum() if summed else out
 
@@ -219,12 +213,12 @@ class SwaptionPortfolio:
     def step(self, t: int):
         vals = self._base_options[t, :, Greek.PNL]
         pos  = self._positions[t, :]
-        return (vals * pos ).sum() * self.utils.contract_size
+        return (vals * pos ).sum() 
 
     def get_value(self, t: int):
         vals = self._base_options[t, :, Greek.PRICE]
         pos  = self._positions[t, :]
-        return (vals * pos ).sum() * self.utils.contract_size
+        return (vals * pos ).sum()
 
     def get_current_position(self, t: int):
         return self._positions[t, t].copy()
@@ -250,14 +244,6 @@ class SwaptionLiabilityPortfolio(SwaptionPortfolio):
         #    (could be a memmap slice or an in‑memory array)
         pos = self._positions_memmap[episode]
         self._positions = np.array(pos, dtype=np.float32)           # (steps, swaps)
-        self._active    = np.ones_like(self._positions, dtype=np.int32)
-
-        # 3) compute per‐episode worst‐case bounds if you need them
-        G = self._base_options[..., Greek.GAMMA]  # shape: (steps, swaps)
-        V = self._base_options[..., Greek.VEGA]
-        cs = self.utils.contract_size
-        self.max_gamma = np.max(np.abs(G * self._positions * cs))
-        self.max_vega   = np.max(np.abs(V * self._positions * cs))
 
     def reset(self):
         # do not zero out positions—they're fixed liabilities.
@@ -289,6 +275,7 @@ class MainPortfolio(AssetInterface):
         """
         super().__init__()
         self.utils = utils
+        self.dt = self.utils.dt
         #self.a_price, self.vol = utils.init_env()
         hedge_swaption, liab_swaption, hedge_swap, liab_swap, liab_swaption_position = utils.generate_swaption_market_data()
         print("initializing classes")
@@ -302,8 +289,12 @@ class MainPortfolio(AssetInterface):
         self.kernel_beta = np.float32(1.0) # standard deviation of the kernel
         self.use_rbf_kernel = False
 
-        print("Main portfolio initialized with kernel beta of ", self.kernel_beta, " using" , ("rbf kernel" if self.use_rbf_kernel else "triangle kernel") if self.kernel_beta > 0 else "no kernel")
 
+        print("Main portfolio initialized with kernel beta of ", self.kernel_beta, " using" , ("rbf kernel" if self.use_rbf_kernel else "triangle kernel") if self.kernel_beta > 0 else "no kernel")
+        print("REMEMBER TO ADD BACK THE SENSITIVITY FOR LIAB AND HEDGE WHEN USING THE RBF KERNEL")
+        assert self.use_rbf_kernel == False, "RBF kernel logic not yet implemented, there needs to be a system for accounting for cross-sensitivity of delta hedges with swaps with the get_hed_liab_relative_sensitivity func"
+        assert self.kernel_beta > 0, "are you sure you want to run without kernel?"
+        self.kernel = (self.rbf_kernel if self.use_rbf_kernel else self.triangle_kernel) if self.kernel_beta >0 else lambda t, vec_len: np.ones(vec_len, dtype=np.float32)
     # -------------- kernel helpers ---------------
     def rbf_kernel(self, center_idx, vector_len):
         if self.kernel_beta <= 0:
@@ -319,10 +310,8 @@ class MainPortfolio(AssetInterface):
         return np.float32(np.clip(1 - distances / half_len, 0, 1))
 
     def compute_local_sensitivity(self, vec, t):
-        if self.kernel_beta <= 0:
-            return np.sum(vec)
-        kernel = (self.rbf_kernel if self.use_rbf_kernel else self.triangle_kernel)(t, len(vec))
-        return np.dot(kernel, vec)
+        weights = self.kernel(t, len(vec))
+        return np.dot(weights, vec)
 
     def get_kernel_sensitivity(self, idx, idx_perpective) -> float:
         """function that compus the sensitivity to the value at idx the perspective of the idx_perspective using the current kernel on a single value"""
@@ -341,8 +330,13 @@ class MainPortfolio(AssetInterface):
     def get_delta_vec(self, t):
         """portfolio delta vector at time t"""
         swap_delta =  self.underlying.get_delta_vec(t)
+        #print("=============\nswap delta vec")
+        #print(swap_delta[:5])
         swaption_delta = np.concatenate([self.hed_port.get_delta_vec(t), self.liab_port.get_delta_vec(t)])
+        ##print("swaption delta")
+        #print(swaption_delta[:5])
         delta_concat =  swaption_delta+swap_delta
+        #print(delta_concat[:5])
         return delta_concat
     
 
@@ -408,47 +402,39 @@ class MainPortfolio(AssetInterface):
         self.sim_episode = sim_episode
         self.underlying.set_path(sim_episode)
 
-        self.hed_port.set_episode(sim_episode)
         self.hed_port.reset()
+        self.hed_port.set_episode(sim_episode)
 
         self.liab_port.reset()
         self.liab_port.set_episode_liab(sim_episode)
-        # prime liability at t=0
-        self.liab_port.add(0, -1)
+
     
     def get_state(self, t: int) -> np.ndarray:
         rate_hed   = self.underlying.get_rate_hed(t)
         rate_liab  = self.underlying.get_rate_liab(t)  
 
-        delta_portfolio    = self.get_delta(t)         
-        delta_local_spot   = self.get_delta_local_spot(t) 
-        delta_local_hed    = self.get_delta_local_hed(t) 
-        delta_local_liab   = self.get_delta_local_liab(t) 
-
-        gamma_portfolio = self.get_gamma(t)            
+        #elta_portfolio    = self.get_delta(t)         
+        #delta_local_spot   = self.get_delta_local_spot(t) 
+        #delta_local_hed    = self.get_delta_local_hed(t) 
+        #delta_local_liab   = self.get_delta_local_liab(t) 
+        #gamma_portfolio = self.get_gamma(t)            
         gamma_local     = self.get_gamma_local_hed(t) 
         hed_gamma_unit  = self.hed_port.get_gamma(t, position_scale=False, single_value=True)
             
-        
-
-        hed_delta =  self.hed_port.get_delta(t, position_scale=False, single_value=True)
-        
-        
+        #hed_delta =  self.hed_port.get_delta(t, position_scale=False, single_value=True)
         state = [
-            rate_hed, rate_liab,
-            delta_portfolio, delta_local_spot, delta_local_hed, delta_local_liab,
-            hed_delta,
-            gamma_portfolio, gamma_local, hed_gamma_unit
+            t*self.dt, 
+            rate_hed, rate_liab, 
+            #delta_portfolio, delta_local_spot, delta_local_hed, delta_local_liab, hed_delta, we dont use delta signals currently
+            gamma_local, hed_gamma_unit
         ]
         
         if FLAGS.vega_obs:
-            vega       = self.get_vega(t)            
+            #vega       = self.get_vega(t)            
             vega_local = self.get_vega_local_hed(t)
-            hed_vega   =  self.hed_port.get_vega(t, position_scale=False, single_value=True)
+            hed_vega_unit   =  self.hed_port.get_vega(t, position_scale=False, single_value=True)
                 
-            state.extend([vega, vega_local, hed_vega])
-
-        state.append(t)
+            state.extend([ vega_local, hed_vega_unit])
         return np.array(state, dtype=np.float32)
 
     def step(self, action_swaption_hed, action_swap_hed, action_swap_liab, t: int, result):
@@ -457,7 +443,7 @@ class MainPortfolio(AssetInterface):
         result.cost_swaption_hed = self.hed_port.add(t, action_swaption_hed)
         # underlying swap rebalancing
         result.cost_swap = self.underlying.add(t, action_swap_hed, action_swap_liab)
-
+        print("cost of swaption and position size", result.cost_swaption_hed, action_swaption_hed * self.utils.contract_size )
         # PnL contributions
         result.step_pnl_hed_swaption  = self.hed_port.step(t)
         result.step_pnl_liab_swaption = self.liab_port.step(t)
