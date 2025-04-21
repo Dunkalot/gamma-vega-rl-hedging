@@ -272,7 +272,6 @@ class D4PGLearner(acme.Learner):
         # Apply gradients.
         self._policy_optimizer.apply(policy_gradients, policy_variables)
         self._critic_optimizer.apply(critic_gradients, critic_variables)
-
         # Losses to track.
         return {
             'critic_loss': critic_loss,
@@ -288,11 +287,10 @@ class D4PGLearner(acme.Learner):
         timestamp = time.time()
         elapsed_time = timestamp - self._timestamp if self._timestamp else 0
         self._timestamp = timestamp
-
+        tf.print(self._observation_network.vol_kernel.a)
         # Update our counts and record it.
         counts = self._counter.increment(steps=1, walltime=elapsed_time)
         fetches.update(counts)
-
         # Checkpoint and attempt to write the logs.
         if self._checkpointer is not None:
             self._checkpointer.save()

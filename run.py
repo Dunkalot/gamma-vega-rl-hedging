@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 import pickle
 from typing import Mapping, Sequence
-
+from gym import spaces
 import tensorflow as tf
 import acme
 from acme import specs
@@ -20,6 +20,7 @@ import pandas as pd
 from environment.Environment import TradingEnv
 from environment.utils import Utils
 import agent.distributional as ad
+from agent.agent import KernelLayer, PolicyWithHedge, ObservationWithKernel
 
 from absl import app
 from absl import flags
@@ -33,6 +34,7 @@ def ordered_asdict(obj):
 print("SETTING FLOAT PRECISION TO 32")
 
 tf.keras.backend.set_floatx('float32')
+tf.keras.mixed_precision.set_global_policy("mixed_float16")
 
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('train_sim', 40_000, 'train episodes (Default 40_000)')
@@ -152,85 +154,6 @@ import matplotlib.pyplot as plt
 # Alias for bijectors
 tfb = tfp.bijectors
 
-class OneYearKernelLayer(snt.Module):
-    """
-    Sonnet module acting like a layer: takes a risk vector [T] and returns
-    a single exposure scalar. Internally computes trainable kernel weights
-    anchored at a fixed tenor (1y at index anchor_index).
-
-    Parameters a,b,c,d,eta,beta are constrained smoothly via Sigmoid bijectors,
-    with optional scaling ranges provided via init args.
-
-    Usage:
-        layer = OneYearKernelLayer(
-            anchor_index=52,
-            a_scale=0.2, b_scale=0.2, c_scale=1.5, d_scale=0.5,
-            eta_scale=0.95, beta_scale=0.5)
-        exposure = layer(risk_vector)
-    """
-    def __init__(self,
-                 anchor_index: int,
-                 tenor_grid: np.ndarray = None,
-                 init_params: dict = None,
-                 a_scale: float = 1.0,
-                 b_scale: float = 1.0,
-                 c_scale: float = 1.0,
-                 d_scale: float = 1.0,
-                 eta_scale: float = 1.0,
-                 beta_scale: float = 1.0,
-                 name: str = None):
-        super().__init__(name=name)
-        self.anchor_index = anchor_index
-        # Tenor grid default 0 to 3 years at 1/52 increments
-        if tenor_grid is None:
-            tau_vals = np.arange(0, 3, 1/52).astype(np.float32)
-        else:
-            tau_vals = np.array(tenor_grid, dtype=np.float32)
-        self.tau_grid = tf.constant(tau_vals, dtype=tf.float32)
-
-        # Default initial params
-        defaults = init_params or {
-            'a': 0.5, 'b': 0.5, 'c': 0.5, 'd': 0.001,
-            'eta': 0.5, 'beta': 0.5
-        }
-        # Build bijectors: sigmoid then scale
-        def make_bij(scale, shift=0.0):
-            chain = []
-            if shift != 0.0:
-                chain.append(tfb.Shift(shift))
-            # scale after sigmoid to map (0,1) -> (0,scale)
-            chain.append(tfb.Scale(scale))
-            chain.append(tfb.Sigmoid())
-            return tfb.Chain(chain)
-
-        # Create trainable TransformedVariables
-        self.a = tfp.util.TransformedVariable(
-            defaults['a'], bijector=make_bij(a_scale), name='a')
-        self.b = tfp.util.TransformedVariable(
-            defaults['b'], bijector=make_bij(b_scale), name='b')
-        self.c = tfp.util.TransformedVariable(
-            defaults['c'], bijector=make_bij(c_scale), name='c')
-        # For d, ensure minimum base level via shift
-        self.d = tfp.util.TransformedVariable(
-            defaults['d'], bijector=make_bij(d_scale, shift=0.001), name='d')
-        self.eta = tfp.util.TransformedVariable(
-            defaults['eta'], bijector=make_bij(eta_scale), name='eta')
-        self.beta = tfp.util.TransformedVariable(
-            defaults['beta'], bijector=make_bij(beta_scale), name='beta')
-
-    def _compute_weights(self) -> tf.Tensor:
-        tau = self.tau_grid
-        vols = (self.a + self.b * tau) * tf.exp(-self.c * tau) + self.d
-        vol_ref = vols[self.anchor_index]
-        tau_ref = tau[self.anchor_index]
-        time_dist = tf.abs(tau - tau_ref)
-        corr = self.eta + (1. - self.eta) * tf.exp(-self.beta * time_dist)
-        return corr * (vols / vol_ref)
-
-    def __call__(self, risk_vector: tf.Tensor) -> tf.Tensor:
-        weights = self._compute_weights()
-        return tf.reduce_sum(weights * risk_vector)
-
 
 
 # The default settings in this network factory will work well for the
@@ -309,17 +232,34 @@ def make_quantile_networks(
     # Get total number of action dimensions from action spec.
     num_dimensions = np.prod(action_spec.shape, dtype=int)
 
-    vol_kernel = OneYearKernelLayer(a_scale=0.1, b_sclae=0.3, c_scale=1.5, d_scale = 0.1)
-    volvol_kernel = OneYearKernelLayer(a_scale=1.5, b_scale=0.3, c_scale=3, d_scale = 0.5)
+    vol_kernel = KernelLayer(a_scale=0.1, b_scale=0.3, c_scale=1.5, d_scale = 0.1)
+    volvol_kernel = KernelLayer(a_scale=1.5, b_scale=0.3, c_scale=3, d_scale = 0.5)
 
-    observation_network = tf2_utils.batch_concat
+
+
+    # Wrap as a Sonnet module so Acme can call it.
+    observation_network = ObservationWithKernel(vol_kernel=vol_kernel, volvol_kernel=volvol_kernel)
+
+
+    #observation_network = tf2_utils.batch_concat
 
     # Create the policy network.
-    policy_network = snt.Sequential([
+    internal_action_spec = specs.BoundedArray(
+        shape=(2,),   # e.g. [a_mag, a_dir]
+        dtype=np.float32,
+        minimum=[0.0, 0.0],
+        maximum=[1.0, 1.0],
+        name="internal_action",
+        )
+    internal_action_dim = 2
+    
+    base_policy = snt.Sequential([
         networks.LayerNormMLP(policy_layer_sizes, activate_final=True),
-        networks.NearZeroInitializedLinear(num_dimensions),
-        networks.TanhToSpec(action_spec),
+        networks.NearZeroInitializedLinear(internal_action_dim),
+        networks.TanhToSpec(internal_action_spec),
     ])
+
+    policy_network = PolicyWithHedge( base_policy=base_policy)
     quantiles = np.arange(quantile_interval, 1.0, quantile_interval)
     # Create the critic network.
     critic_network = snt.Sequential([
@@ -329,11 +269,12 @@ def make_quantile_networks(
         ad.QuantileDiscreteValuedHead(quantiles=quantiles, prob_type=ad.QuantileDistProbType.MID),
     ])
     
+
     return {
         'policy': policy_network,
         'critic': critic_network,
         'observation': observation_network,
-    }
+    }, vol_kernel, volvol_kernel
 
 def make_iqn_networks(
     action_spec: specs.BoundedArray,
@@ -410,10 +351,13 @@ def main(argv):
     if FLAGS.critic == 'c51':
         agent_networks = make_networks(action_spec=environment_spec.actions, max_time_steps=utils.num_period)
     elif 'qr' in FLAGS.critic:
-        agent_networks = make_quantile_networks(action_spec=environment_spec.actions, time_embedding_dim=16, dt=utils.dt)
+        agent_networks, vol_kernel, volvol_kernel = make_quantile_networks(action_spec=environment_spec.actions)
     elif FLAGS.critic == 'iqn':
         assert FLAGS.obj_func == 'cvar', 'IQN only support CVaR objective.'
         agent_networks = make_iqn_networks(action_spec=environment_spec.actions,cvar_th=FLAGS.threshold, max_time_steps=FLAGS.init_ttm)
+
+    utils.vol_kernel = vol_kernel
+    utils.volvol_kernel = volvol_kernel
 
     # Construct the agent.
     agent = D4PG(
@@ -467,6 +411,8 @@ def main(argv):
     #                    action_low=float(FLAGS.action_space[0]), action_high=float(FLAGS.action_space[1]))
     # TODO: FIND UD AF HVORFOR DEN TERMINERER UDEN AT EVALUATE
     eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread)
+    eval_utils.vol_kernel = vol_kernel
+    eval_utils.volvol_kernel = volvol_kernel
     eval_env = make_environment(utils=eval_utils, logger=make_logger(work_folder,'eval_env'))
     eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])
     eval_loop.run(num_episodes=FLAGS.eval_sim)   

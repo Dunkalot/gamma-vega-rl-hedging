@@ -39,10 +39,197 @@ import reverb
 import sonnet as snt
 import numpy as np
 import tensorflow as tf
+import tensorflow_probability as tfp
+tfb = tfp.bijectors
 import agent.learning as learning
 
 from absl import flags
 FLAGS = flags.FLAGS
+
+
+class ObservationWithKernel(snt.Module):
+    """
+    Sonnet module that applies shared KernelLayer transforms to raw observations.
+    Expects input tensor of shape [..., N], where:
+      - indices 0:4       = base features [swaption_gamma, swaption_vega, swap_delta_hed, swap_delta_liab]
+      - indices 4:7       = three additional base features
+      - indices 7:7+105   = gamma_vector
+      - indices 7+105:7+210 = vega_vector
+      - indices 7+210:     = delta_vector
+
+    Returns tensor of shape [..., 7]:
+      [gamma_ratio, vega_ratio, delta_ratio_hed, delta_ratio_liab, base_features]
+    """
+    def __init__(self,
+                 vol_kernel: snt.Module,
+                 volvol_kernel: snt.Module,
+                 default_anchor_index: int = np.int32(52),
+                 name: str = None):
+        super().__init__(name=name)
+        self.vol_kernel = vol_kernel
+        self.volvol_kernel = volvol_kernel
+        self.default_anchor = default_anchor_index
+    @tf.function(jit_compile=True)
+    def __call__(self, observation: tf.Tensor) -> tf.Tensor:
+        # 1) base features
+        swaption_gamma = observation[..., 0]
+        swaption_vega  = observation[..., 1]
+        swap_delta_hed = observation[..., 2]
+        swap_delta_liab = observation[..., 3]
+        base_features = observation[..., 4:7]  # [...,3]
+
+        # 2) greek block
+        greek_block = observation[..., 7:]
+        gamma_vector = greek_block[..., :105]
+        vega_vector  = greek_block[..., 105:210]
+        delta_vector = greek_block[..., 210:]
+
+        # 3) compute hedge ratios
+        gamma_ratio = tf.math.divide_no_nan(
+            self.vol_kernel(gamma_vector), swaption_gamma)
+        vega_ratio = tf.math.divide_no_nan(
+            self.volvol_kernel(vega_vector), swaption_vega)
+        delta_ratio_hed = tf.math.divide_no_nan(
+            self.vol_kernel(delta_vector, anchor_index=self.default_anchor),
+            swap_delta_hed)
+        delta_ratio_liab = tf.math.divide_no_nan(
+            self.vol_kernel(delta_vector,
+                             anchor_index=self.default_anchor * 2),
+            swap_delta_liab)
+
+        # 4) expand dims
+        gamma_ratio   = tf.expand_dims(gamma_ratio, -1)
+        vega_ratio    = tf.expand_dims(vega_ratio,  -1)
+        delta_ratio_hed   = tf.expand_dims(delta_ratio_hed,  -1)
+        delta_ratio_liab  = tf.expand_dims(delta_ratio_liab,  -1)
+        # 5) concatenate output
+        return tf.concat([
+            gamma_ratio,
+            vega_ratio,
+            delta_ratio_hed,
+            delta_ratio_liab,
+            base_features
+        ], axis=-1)  # [...,7]
+
+class KernelLayer(snt.Module):
+    """
+    Trainable 1D kernel that shares weights but can compute exposures
+    from different anchor points on the tenor grid.
+
+    Usage:
+        layer = KernelLayer(
+            tenor_grid=None,
+            init_params=None,
+            a_scale=..., b_scale=..., c_scale=..., d_scale=...,
+            eta_scale=..., beta_scale=...,
+            default_anchor_index=52)
+        # Compute exposures with shared parameters at any anchor:
+        exposure_1y = layer(risk_vector)                  # uses default anchor
+        exposure_6m = layer(risk_vector, anchor_index=26)  # override anchor
+    """
+    def __init__(self,
+                 tenor_grid: np.ndarray = None,
+                 init_params: dict = None,
+                 a_scale: float = 1.0,
+                 b_scale: float = 1.0,
+                 c_scale: float = 1.0,
+                 d_scale: float = 1.0,
+                 eta_scale: float = 0.95,
+                 beta_scale: float = 0.5,
+                 default_anchor_index: int = 52,
+                 name: str = None):
+        super().__init__(name=name)
+        # Build tenor grid: default 0 to 2 years at 1/52 increments
+        if tenor_grid is None:
+            tau_vals = np.arange(0, 2 + 1e-3, 1/52).astype(np.float32)
+        else:
+            tau_vals = np.array(tenor_grid, dtype=np.float32)
+        self.tau_grid = tf.constant(tau_vals, dtype=tf.float32)
+        self.default_anchor = default_anchor_index
+
+        # Default initial params
+        defaults = init_params or {
+            'a': a_scale*0.5, 'b': b_scale*0.5, 'c': c_scale*0.5, 'd':d_scale* 0.5,
+            'eta': eta_scale*0.5, 'beta': beta_scale*0.5
+        }
+        def make_bij(scale, shift=0.0):
+            chain = []
+            if shift != 0.0:
+                chain.append(tfb.Shift(shift))
+            chain.append(tfb.Scale(scale))
+            chain.append(tfb.Sigmoid())
+            return tfb.Chain(chain)
+
+        # Trainable parameters with smooth (0,1) constraint then scaled
+        self.a = tfp.util.TransformedVariable(
+            defaults['a'], bijector=make_bij(a_scale), name='a')
+        self.b = tfp.util.TransformedVariable(
+            defaults['b'], bijector=make_bij(b_scale), name='b')
+        self.c = tfp.util.TransformedVariable(
+            defaults['c'], bijector=make_bij(c_scale), name='c')
+        self.d = tfp.util.TransformedVariable(
+            defaults['d'], bijector=make_bij(d_scale, shift=0.001), name='d')
+        self.eta = tfp.util.TransformedVariable(
+            defaults['eta'], bijector=make_bij(eta_scale), name='eta')
+        self.beta = tfp.util.TransformedVariable(
+            defaults['beta'], bijector=make_bij(beta_scale, shift=0.001), name='beta')
+
+    def _weights_for_anchor(self, anchor_index: int) -> tf.Tensor:
+        """
+        Compute the kernel weight vector [T] for a given anchor index.
+        """
+        tau = self.tau_grid
+        vols = (self.a + self.b * tau) * tf.exp(-self.c * tau) + self.d
+        vol_ref = tf.gather(vols, anchor_index)
+        tau_ref = tf.gather(tau, anchor_index)
+        time_dist = tf.abs(tau - tau_ref)
+        corr = self.eta + (1. - self.eta) * tf.exp(-self.beta * time_dist)
+        return corr * (vols / vol_ref)
+    @tf.function(jit_compile=True)
+    def __call__(self,
+                 risk_vector: tf.Tensor,
+                 anchor_index: int = None) -> tf.Tensor:
+        """
+        Args:
+          risk_vector: Tensor [B, T] or [T]
+          anchor_index: optional override of default anchor position
+        Returns:
+          exposure: same leading batch dims, sum(weights · risk_vector)
+        """
+        # Determine anchor to use
+        idx = anchor_index if anchor_index is not None else self.default_anchor
+        # Compute weight vector for this anchor
+        weights = self._weights_for_anchor(idx)  # [T]
+        # Inner product along last dim
+        return tf.reduce_sum(tf.cast(risk_vector,tf.float32) * weights, axis=-1)
+
+class PolicyWithHedge(snt.Module):
+  def __init__(self,  base_policy: snt.Module, name=None):
+    super().__init__(name=name)
+    self.base_pol = base_policy
+
+  def __call__(self, obs):
+
+    # 2) Unpack first 4 features
+    gamma, vega, delta_h, delta_l = tf.unstack(obs[..., :4], axis=-1)
+
+    # 3) Actor outputs two scalars per example
+    action_mag, action_dir = tf.unstack(self.base_pol(obs), axis=-1)
+
+    # 4) Compute the final hedge
+    applied_hedge = action_mag * ((1 - action_dir) * gamma
+                                  +    action_dir  * vega)
+
+    # 5) Stack everything on the last axis
+    return tf.stack([
+      action_mag,
+      action_dir,
+      gamma,
+      vega,
+      -applied_hedge,
+      -delta_h,
+      -delta_l
+    ], axis=-1)
 
 
 @dataclasses.dataclass
@@ -113,6 +300,7 @@ class D4PGNetworks:
             self.observation_network,
             self.policy_network,
         ]
+  
 
         # If a stochastic/non-greedy policy is requested, add Gaussian noise on
         # top to enable a simple form of exploration.
@@ -341,7 +529,8 @@ class D4PG(agent.Agent):
                 clipping=clipping,
                 replay_table_name=replay_table_name,
             ))
-        print("policy internal network dimensions: ", policy_network)
+        #tf.print("policy internal network dimensions: ", policy_network)
+        #tf.print("observation network internal dimensions:", observation_network)
         # TODO(mwhoffman): pass the network dataclass in directly.
         online_networks = D4PGNetworks(policy_network=policy_network,
                                        critic_network=critic_network,
