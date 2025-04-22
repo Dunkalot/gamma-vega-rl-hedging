@@ -20,9 +20,11 @@ import tensorflow as tf
 class StepResult:
     episode: int = 0
     t: int = 0
-    swaption_action: float = 0.0
-    swap_action_hed: float = 0.0
-    swap_action_liab: float = 0.0
+    action_swaption: float = 0.0
+    action_swap_hed: float = 0.0
+    action_swap_liab: float = 0.0
+    action_swap_hed_mag: float = 0.0
+    action_swap_liab_mag: float = 0.0
 
     cost_swaption_hed: float = 0.0
     cost_swap_hed: float = 0.0
@@ -46,8 +48,8 @@ class StepResult:
     vega_before: float = 0.0
     vega_after: float = 0.0
 
-    action_mag: float = 0.0
-    action_dir: float = 0.0
+    action_gamma: float = 0.0
+    action_vega: float = 0.0
     gamma_ratio: float = 0.0
     vega_ratio: float = 0.0
 
@@ -63,7 +65,7 @@ class EvalLog:
     @staticmethod
     def _log_before(self, result):
         
-            result.gamma_before, result.vega_before, result.delta_local_hed_before, result.delta_local_hed_before = self.portfolio.get_kernel_greek_risk()
+            result.gamma_before, result.vega_before, result.delta_local_hed_before, result.delta_local_liab_before = self.portfolio.get_kernel_greek_risk()
             result.delta_before = self.portfolio.get_delta(self.t)
     @staticmethod
     def _log_after(self, result):
@@ -103,7 +105,7 @@ class TradingEnv(gym.Env):
         self.action_space = spaces.Box(
             low=-np.inf,    
             high=+np.inf,
-            shape=(7,),
+            shape=(9,),
             dtype=np.float32
         )
         # obs space bounds
@@ -136,7 +138,7 @@ class TradingEnv(gym.Env):
         t = self.t
         result = StepResult( episode=self.sim_episode, t=t)
 
-        result.action_mag, result.action_dir, result.gamma_ratio,result.vega_ratio,result.swaption_action, result.swap_action_hed, result.swap_action_liab = action
+        result.action_gamma, result.action_vega, result.action_swap_hed_mag, result.action_swap_liab_mag, result.gamma_ratio ,result.vega_ratio,result.action_swaption, result.action_swap_hed, result.action_swap_liab = action
         assert not np.isnan(action).any(), action
         #if self.print_nanwarning and np.isnan(action).any():
         #    self.print_nanwarning = False
@@ -145,9 +147,9 @@ class TradingEnv(gym.Env):
         #if self.logger: # dont waste resources
         self.log_bef(self,result) 
         result.step_pnl = reward = self.portfolio.step(
-            action_swaption_hed=result.swaption_action,
-            action_swap_hed=result.swap_action_hed,
-            action_swap_liab=result.swap_action_liab,
+            action_swaption_hed=result.action_swaption,
+            action_swap_hed=result.action_swap_hed,
+            action_swap_liab=result.action_swap_liab,
             t=self.t,
             result=result,
         )

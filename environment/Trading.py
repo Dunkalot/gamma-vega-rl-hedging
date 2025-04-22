@@ -439,7 +439,7 @@ class MainPortfolio(AssetInterface):
         vega_unit_hed = self.hed_port._base_options[t,t,Greek.VEGA] * self.utils.contract_size
         delta_unit_hed  = self.underlying.active_path_hed[t, t, SwapKeys.DELTA] * self.utils.contract_size
         delta_unit_liab = self.underlying.active_path_liab[t, t, SwapKeys.DELTA] * self.utils.contract_size
-        delta_unit_hed_swaption = self.hed_port._base_options[t,t,Greek.DELTA]
+        delta_unit_hed_swaption = self.hed_port._base_options[t,t,Greek.DELTA] * self.utils.contract_size
         state = np.array([gamma_unit_hed, vega_unit_hed, delta_unit_hed_swaption, delta_unit_hed,delta_unit_liab,
                         t*self.dt,  rate_hed, rate_liab], dtype=np.float32)
 

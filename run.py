@@ -253,7 +253,7 @@ def make_quantile_networks(
         maximum=[1.0, 1.0, 1.0, 1.0],
         name="internal_action",
         )
-    internal_action_dim = 2
+    internal_action_dim = 4
     
     base_policy = snt.Sequential([
         networks.LayerNormMLP(policy_layer_sizes, activate_final=True),

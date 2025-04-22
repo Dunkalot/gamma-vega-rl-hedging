@@ -108,7 +108,7 @@ class KernelLayer(snt.Module):
             defaults['eta'], bijector=make_bij(eta_scale), name='eta')
         self.beta = tfp.util.TransformedVariable(
             defaults['beta'], bijector=make_bij(beta_scale, shift=0.001), name='beta')
-
+    @tf.function(jit_compile=True)   
     def _weights_for_anchor(self, anchor_index: int) -> tf.Tensor:
         """
         Compute the kernel weight vector [T] for a given anchor index.
@@ -136,8 +136,8 @@ class KernelLayer(snt.Module):
         # Compute weight vector for this anchor
         weights = self._weights_for_anchor(idx)  # [T]
         # Inner product along last dim
-        return tf.reduce_sum(tf.cast(risk_vector,tf.float32) * weights, axis=-1)
-    
+        return tf.reduce_sum(risk_vector * weights, axis=-1)
+    @tf.function
     def weight_single(self, source_idx: int, *, target_idx: Optional[int] = None) -> tf.Tensor:
         """Convenience: K(target_idx, source_idx)."""
         tgt = target_idx if target_idx is not None else self.default_anchor
@@ -172,14 +172,15 @@ class ObservationWithKernel(snt.Module):
     @tf.function(jit_compile=True)
     def __call__(self, observation: tf.Tensor) -> tf.Tensor:
         # 1) base features
-        swaption_gamma = observation[..., 0]
+        swaption_gamma = observation[:, 0]
         swaption_vega  = observation[..., 1]
-        swap_delta_hed = observation[..., 2]
-        swap_delta_liab = observation[..., 3]
-        base_features = observation[..., 4:7]  # [...,3]
+        swaption_delta = observation[..., 2]
+        swap_delta_hed = observation[..., 3]
+        swap_delta_liab = observation[..., 4]
+        base_features = observation[..., 5:8]  # [...,3]
 
         # 2) greek block
-        greek_block = observation[..., 7:]
+        greek_block = observation[..., 8:]
         gamma_vector = greek_block[..., :105]
         vega_vector  = greek_block[..., 105:210]
         delta_vector = greek_block[..., 210:]
@@ -199,23 +200,29 @@ class ObservationWithKernel(snt.Module):
         # cross‑kernel entries -------------------------------------------
         k12_raw = self.vol_kernel.weight_single(self.anchor_hed, target_idx=self.anchor_liab)  # K(1y→2y)
         k21_raw = self.vol_kernel.weight_single(self.anchor_liab, target_idx=self.anchor_hed)  # K(2y→1y)
-        k12 = tf.math.divide_no_nan(k12_raw, swap_delta_hed)  # effect in 1y-delta units per 2y swap notional
+        k12 = tf.math.divide_no_nan(k12_raw, swap_delta_hed)  # effect in 1y-delta units per 2y swap notional (delta change at 1y when 2y changes)
         k21 = tf.math.divide_no_nan(k21_raw, swap_delta_liab)  # effect in 2y-delta units per 1y swap notional
         # 4) expand dims
         gamma_ratio   = tf.expand_dims(gamma_ratio, -1)
         vega_ratio    = tf.expand_dims(vega_ratio,  -1)
+        delta_ratio_swaption_swap_hed = tf.math.divide_no_nan(swaption_delta,swap_delta_hed)
+        delta_ratio_swaption_swap_liab = tf.math.divide_no_nan(swaption_delta,swap_delta_liab) # delta_swaption_hed/delta_swap_liab
         delta_ratio_hed   = tf.expand_dims(delta_ratio_hed,  -1)
         delta_ratio_liab  = tf.expand_dims(delta_ratio_liab,  -1)
         # 5) concatenate output
-        return tf.concat([
+        result = tf.concat([
             gamma_ratio,
             vega_ratio,
+            tf.expand_dims(delta_ratio_swaption_swap_hed,-1),
+            tf.expand_dims(delta_ratio_swaption_swap_liab,-1),
             delta_ratio_hed,
             delta_ratio_liab,
-            k12,
-            k21,
-            base_features, 
-        ], axis=-1)  # [...,7]
+            tf.expand_dims(k12,-1),
+            tf.expand_dims(k21,-1),
+            base_features
+        ], axis=-1) 
+        tf.ensure_shape(result, [None, 11])
+        return  result# [...,11]
 
 
 class PolicyWithHedge(snt.Module):
@@ -224,40 +231,68 @@ class PolicyWithHedge(snt.Module):
         self.base_pol = base_policy
         self.anchor_hed = 52
         self.anchor_liab = self.anchor_hed * 2
-
+    
+    @tf.function
     def _static_delta_opt(self, delta_ratio_hed, delta_ratio_liab, k12, k21):
-        S = tf.stack([[1,k12], [k21,1]])
-        d= tf.stack([[delta_ratio_hed],[delta_ratio_liab]])
-        obt_bounds = tf.linalg.solve(S,d)
-        return obt_bounds
-
-
-
+        # Compute determinant directly
+        det = 1.0 - k12 * k21
+        
+        # Solve the 2×2 system analytically instead of using the general solver
+        x1 = (delta_ratio_hed - k12 * delta_ratio_liab) / det
+        x2 = (delta_ratio_liab - k21 * delta_ratio_hed) / det
+        
+        # Stack the results
+        return tf.stack([x1, x2], axis=-1)
+    
+    @tf.function(jit_compile=True)
     def __call__(self, obs):
-
-        # 2) Unpack first 4 features
-        gamma_ratio, vega_ratio, delta_h, delta_l = tf.unstack(obs[..., :4], axis=-1)
+        obs = tf.ensure_shape(obs, [None,11])
+        # 2) Unpack first 8 features
+        notional_gamma = obs[:, 0]
+        notional_vega = obs[:, 1]
+        delta_swaption_swap_hed = obs[:, 2]
+        delta_swaption_swap_liab = obs[:, 3]
+        delta_ratio_h = obs[:, 4]
+        delta_ratio_l = obs[:, 5]
+        k12 = obs[:, 6]
+        k21 = obs[:, 7]
 
         # 3) Actor outputs two scalars per example
-        action_mag, action_dir = tf.unstack(self.base_pol(obs), axis=-1)
+        actions = self.base_pol(obs)
+        action_gamma = actions[..., 0]
+        action_vega = actions[..., 1]
+        action_swap_hed = actions[..., 2]
+        action_swap_liab = actions[..., 3]
 
-        # 4) Compute the final hedge
-        applied_hedge = action_mag * ((1 - action_dir) * gamma_ratio
-                                    +    action_dir  * vega_ratio)
         
+        # 4) Compute the final hedge
+        notional_swaption = -(action_gamma * notional_gamma + action_vega * notional_vega) 
+        # 5) take into account what this position adds in terms of delta
+        # convert to swap notional
+        swap_notional_adjust_hed = notional_swaption * delta_swaption_swap_hed 
+        swap_notional_adjust_liab = notional_swaption * delta_swaption_swap_liab * k21 # multiply by k21 to get the kernel weighted sensitivity
+
+        swap_bounds =  self._static_delta_opt(delta_ratio_hed=delta_ratio_h, delta_ratio_liab=delta_ratio_l, k12=k12, k21=k21)
+        # optimal bound + whatever delta that comes with the swaption adjusted for their respective sensitivities
+        swap_bound_hed = swap_bounds[...,0] + swap_notional_adjust_hed 
+        swap_bound_liab = swap_bounds[...,1] + swap_notional_adjust_liab
+
+        notional_swap_hed = -1 * action_swap_hed * swap_bound_hed
+        notional_swap_liab = -1 * action_swap_liab * swap_bound_liab
+
+
         # 5) Stack everything on the last axis
         action = tf.stack([
-        action_mag,
-        action_dir,
-        gamma_ratio,
-        vega_ratio,
-        -applied_hedge,
-        -delta_h,
-        -delta_l
+        action_gamma,
+        action_vega,
+        action_swap_hed,
+        action_swap_liab,
+        notional_gamma,
+        notional_vega,
+        notional_swaption,
+        notional_swap_hed,
+        notional_swap_liab
         ], axis=-1)
-        
-        #tf.print(action[...,:4])
-        #tf.print(action[...,4:],"\n")
         return action
 
 
