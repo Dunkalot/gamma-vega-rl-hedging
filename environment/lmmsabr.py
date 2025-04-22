@@ -1803,7 +1803,7 @@ class LMMSABR:
         return sigma
 
 
-    def black_swaption_price(self, F, K, T, sigma, annuity=1.0):
+    def black_swaption_price(self, F, K, T, sigma, annuity=1.0): # TODO: take into account the forward measure by changing numeraire and such
         """
         Black's formula for payer swaption pricing.
 

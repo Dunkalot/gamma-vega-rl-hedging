@@ -46,71 +46,6 @@ import agent.learning as learning
 from absl import flags
 FLAGS = flags.FLAGS
 
-
-class ObservationWithKernel(snt.Module):
-    """
-    Sonnet module that applies shared KernelLayer transforms to raw observations.
-    Expects input tensor of shape [..., N], where:
-      - indices 0:4       = base features [swaption_gamma, swaption_vega, swap_delta_hed, swap_delta_liab]
-      - indices 4:7       = three additional base features
-      - indices 7:7+105   = gamma_vector
-      - indices 7+105:7+210 = vega_vector
-      - indices 7+210:     = delta_vector
-
-    Returns tensor of shape [..., 7]:
-      [gamma_ratio, vega_ratio, delta_ratio_hed, delta_ratio_liab, base_features]
-    """
-    def __init__(self,
-                 vol_kernel: snt.Module,
-                 volvol_kernel: snt.Module,
-                 default_anchor_index: int = np.int32(52),
-                 name: str = None):
-        super().__init__(name=name)
-        self.vol_kernel = vol_kernel
-        self.volvol_kernel = volvol_kernel
-        self.default_anchor = default_anchor_index
-    @tf.function(jit_compile=True)
-    def __call__(self, observation: tf.Tensor) -> tf.Tensor:
-        # 1) base features
-        swaption_gamma = observation[..., 0]
-        swaption_vega  = observation[..., 1]
-        swap_delta_hed = observation[..., 2]
-        swap_delta_liab = observation[..., 3]
-        base_features = observation[..., 4:7]  # [...,3]
-
-        # 2) greek block
-        greek_block = observation[..., 7:]
-        gamma_vector = greek_block[..., :105]
-        vega_vector  = greek_block[..., 105:210]
-        delta_vector = greek_block[..., 210:]
-
-        # 3) compute hedge ratios
-        gamma_ratio = tf.math.divide_no_nan(
-            self.vol_kernel(gamma_vector), swaption_gamma)
-        vega_ratio = tf.math.divide_no_nan(
-            self.volvol_kernel(vega_vector), swaption_vega)
-        delta_ratio_hed = tf.math.divide_no_nan(
-            self.vol_kernel(delta_vector, anchor_index=self.default_anchor),
-            swap_delta_hed)
-        delta_ratio_liab = tf.math.divide_no_nan(
-            self.vol_kernel(delta_vector,
-                             anchor_index=self.default_anchor * 2),
-            swap_delta_liab)
-
-        # 4) expand dims
-        gamma_ratio   = tf.expand_dims(gamma_ratio, -1)
-        vega_ratio    = tf.expand_dims(vega_ratio,  -1)
-        delta_ratio_hed   = tf.expand_dims(delta_ratio_hed,  -1)
-        delta_ratio_liab  = tf.expand_dims(delta_ratio_liab,  -1)
-        # 5) concatenate output
-        return tf.concat([
-            gamma_ratio,
-            vega_ratio,
-            delta_ratio_hed,
-            delta_ratio_liab,
-            base_features
-        ], axis=-1)  # [...,7]
-
 class KernelLayer(snt.Module):
     """
     Trainable 1D kernel that shares weights but can compute exposures
@@ -202,34 +137,128 @@ class KernelLayer(snt.Module):
         weights = self._weights_for_anchor(idx)  # [T]
         # Inner product along last dim
         return tf.reduce_sum(tf.cast(risk_vector,tf.float32) * weights, axis=-1)
+    
+    def weight_single(self, source_idx: int, *, target_idx: Optional[int] = None) -> tf.Tensor:
+        """Convenience: K(target_idx, source_idx)."""
+        tgt = target_idx if target_idx is not None else self.default_anchor
+
+
+        return self._weights_for_anchor(tgt)[source_idx]
+
+class ObservationWithKernel(snt.Module):
+    """
+    Sonnet module that applies shared KernelLayer transforms to raw observations.
+    Expects input tensor of shape [..., N], where:
+      - indices 0:4       = base features [swaption_gamma, swaption_vega, swap_delta_hed, swap_delta_liab]
+      - indices 4:7       = three additional base features
+      - indices 7:7+105   = gamma_vector
+      - indices 7+105:7+210 = vega_vector
+      - indices 7+210:     = delta_vector
+
+    Returns tensor of shape [..., 7]:
+      [gamma_ratio, vega_ratio, delta_ratio_hed, delta_ratio_liab, base_features]
+    """
+    def __init__(self,
+                 vol_kernel: KernelLayer,
+                 volvol_kernel: KernelLayer,
+                 default_anchor_index: int = np.int32(52),
+                 name: str = None):
+        super().__init__(name=name)
+        self.vol_kernel = vol_kernel
+        self.volvol_kernel = volvol_kernel
+        self.default_anchor = default_anchor_index
+        self.anchor_hed = int(default_anchor_index)
+        self.anchor_liab = int(default_anchor_index * 2)
+    @tf.function(jit_compile=True)
+    def __call__(self, observation: tf.Tensor) -> tf.Tensor:
+        # 1) base features
+        swaption_gamma = observation[..., 0]
+        swaption_vega  = observation[..., 1]
+        swap_delta_hed = observation[..., 2]
+        swap_delta_liab = observation[..., 3]
+        base_features = observation[..., 4:7]  # [...,3]
+
+        # 2) greek block
+        greek_block = observation[..., 7:]
+        gamma_vector = greek_block[..., :105]
+        vega_vector  = greek_block[..., 105:210]
+        delta_vector = greek_block[..., 210:]
+
+        # 3) compute hedge ratios
+        gamma_ratio = tf.math.divide_no_nan(
+            self.vol_kernel(gamma_vector), swaption_gamma)
+        vega_ratio = tf.math.divide_no_nan(
+            self.volvol_kernel(vega_vector), swaption_vega)
+        delta_ratio_hed = tf.math.divide_no_nan(
+            self.vol_kernel(delta_vector, anchor_index=self.default_anchor),
+            swap_delta_hed)
+        delta_ratio_liab = tf.math.divide_no_nan(
+            self.vol_kernel(delta_vector,
+                             anchor_index=self.default_anchor * 2),
+            swap_delta_liab)
+        # cross‑kernel entries -------------------------------------------
+        k12_raw = self.vol_kernel.weight_single(self.anchor_hed, target_idx=self.anchor_liab)  # K(1y→2y)
+        k21_raw = self.vol_kernel.weight_single(self.anchor_liab, target_idx=self.anchor_hed)  # K(2y→1y)
+        k12 = tf.math.divide_no_nan(k12_raw, swap_delta_hed)  # effect in 1y-delta units per 2y swap notional
+        k21 = tf.math.divide_no_nan(k21_raw, swap_delta_liab)  # effect in 2y-delta units per 1y swap notional
+        # 4) expand dims
+        gamma_ratio   = tf.expand_dims(gamma_ratio, -1)
+        vega_ratio    = tf.expand_dims(vega_ratio,  -1)
+        delta_ratio_hed   = tf.expand_dims(delta_ratio_hed,  -1)
+        delta_ratio_liab  = tf.expand_dims(delta_ratio_liab,  -1)
+        # 5) concatenate output
+        return tf.concat([
+            gamma_ratio,
+            vega_ratio,
+            delta_ratio_hed,
+            delta_ratio_liab,
+            k12,
+            k21,
+            base_features, 
+        ], axis=-1)  # [...,7]
+
 
 class PolicyWithHedge(snt.Module):
-  def __init__(self,  base_policy: snt.Module, name=None):
-    super().__init__(name=name)
-    self.base_pol = base_policy
+    def __init__(self,  base_policy: snt.Module, name=None):
+        super().__init__(name=name)
+        self.base_pol = base_policy
+        self.anchor_hed = 52
+        self.anchor_liab = self.anchor_hed * 2
 
-  def __call__(self, obs):
+    def _static_delta_opt(self, delta_ratio_hed, delta_ratio_liab, k12, k21):
+        S = tf.stack([[1,k12], [k21,1]])
+        d= tf.stack([[delta_ratio_hed],[delta_ratio_liab]])
+        obt_bounds = tf.linalg.solve(S,d)
+        return obt_bounds
 
-    # 2) Unpack first 4 features
-    gamma, vega, delta_h, delta_l = tf.unstack(obs[..., :4], axis=-1)
 
-    # 3) Actor outputs two scalars per example
-    action_mag, action_dir = tf.unstack(self.base_pol(obs), axis=-1)
 
-    # 4) Compute the final hedge
-    applied_hedge = action_mag * ((1 - action_dir) * gamma
-                                  +    action_dir  * vega)
+    def __call__(self, obs):
 
-    # 5) Stack everything on the last axis
-    return tf.stack([
-      action_mag,
-      action_dir,
-      gamma,
-      vega,
-      -applied_hedge,
-      -delta_h,
-      -delta_l
-    ], axis=-1)
+        # 2) Unpack first 4 features
+        gamma_ratio, vega_ratio, delta_h, delta_l = tf.unstack(obs[..., :4], axis=-1)
+
+        # 3) Actor outputs two scalars per example
+        action_mag, action_dir = tf.unstack(self.base_pol(obs), axis=-1)
+
+        # 4) Compute the final hedge
+        applied_hedge = action_mag * ((1 - action_dir) * gamma_ratio
+                                    +    action_dir  * vega_ratio)
+        
+        # 5) Stack everything on the last axis
+        action = tf.stack([
+        action_mag,
+        action_dir,
+        gamma_ratio,
+        vega_ratio,
+        -applied_hedge,
+        -delta_h,
+        -delta_l
+        ], axis=-1)
+        
+        #tf.print(action[...,:4])
+        #tf.print(action[...,4:],"\n")
+        return action
 
 
 @dataclasses.dataclass
@@ -306,10 +335,10 @@ class D4PGNetworks:
         # top to enable a simple form of exploration.
         # TODO(mwhoffman): Refactor this to remove it from the class.
         if sigma > 0.0:
-            stack += [
-                network_utils.ClippedGaussian(sigma),
-                network_utils.ClipToSpec(environment_spec.actions),
-            ]
+           stack += [
+               network_utils.ClippedGaussian(sigma),
+               network_utils.ClipToSpec(environment_spec.actions),
+           ]
 
         # Return a network which sequentially evaluates everything in the stack.
         return snt.Sequential(stack)

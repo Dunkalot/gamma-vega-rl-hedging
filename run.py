@@ -17,7 +17,7 @@ import dm_env
 import numpy as np
 import sonnet as snt
 import pandas as pd
-from environment.Environment import TradingEnv
+from environment.Environment import TradingEnv, TrainLog, EvalLog
 from environment.utils import Utils
 import agent.distributional as ad
 from agent.agent import KernelLayer, PolicyWithHedge, ObservationWithKernel
@@ -91,13 +91,15 @@ def make_loggers(work_folder):
         learner=make_logger(work_folder, 'learner')
     )
 
-def make_environment(utils, logger = None) -> dm_env.Environment:
+def make_environment(utils,log_bef=None, log_af=None, logger = None) -> dm_env.Environment:
     # Make sure the environment obeys the dm_env.Environment interface.
     environment = wrappers.GymWrapper(TradingEnv(
-    utils=utils, 
+    utils=utils,
+    log_bef=log_bef,
+    log_af=log_af,
     logger=logger))
     # Clip the action returned by the agent to the environment spec.
-    environment = wrappers.CanonicalSpecWrapper(environment, clip=True)
+    #environment = wrappers.CanonicalSpecWrapper(environment, clip=False) # no need for scaling output
     environment = wrappers.SinglePrecisionWrapper(environment)
 
     return environment
@@ -213,11 +215,11 @@ def make_networks(
         ad.RiskDiscreteValuedHead(vmin, vmax, num_atoms),
     ])
 
-    return {
-        'policy': policy_network,
-        'critic': critic_network,
-        'observation': observation_network,
-    }
+    # return {
+    #     'policy': policy_network,
+    #     'critic': critic_network,
+    #     'observation': observation_network,
+    # }
 
 def make_quantile_networks(
     action_spec: specs.BoundedArray,
@@ -245,10 +247,10 @@ def make_quantile_networks(
 
     # Create the policy network.
     internal_action_spec = specs.BoundedArray(
-        shape=(2,),   # e.g. [a_mag, a_dir]
+        shape=(4,),   # e.g. [a_mag, a_dir]
         dtype=np.float32,
-        minimum=[0.0, 0.0],
-        maximum=[1.0, 1.0],
+        minimum=[0.0, 0.0, 0.0, 0.0],
+        maximum=[1.0, 1.0, 1.0, 1.0],
         name="internal_action",
         )
     internal_action_dim = 2
@@ -302,11 +304,11 @@ def make_iqn_networks(
     # Create the critic network.
     critic_network = ad.IQNCritic(cvar_th, n_cos, n_tau, n_k, critic_layer_sizes, quantiles, ad.QuantileDistProbType.MID)
     
-    return {
-        'policy': policy_network,
-        'critic': critic_network,
-        'observation': observation_network,
-    }
+    # return {
+    #     'policy': policy_network,
+    #     'critic': critic_network,
+    #     'observation': observation_network,
+    # }
 
 def save_policy(policy_network, checkpoint_folder):
     
@@ -346,7 +348,10 @@ def main(argv):
     #              action_low=float(FLAGS.action_space[0]), action_high=float(FLAGS.action_space[1]))
     utils = Utils(n_episodes=FLAGS.train_sim, tenor=4)
     loggers = make_loggers(work_folder=work_folder)
-    environment = make_environment(utils=utils)#, logger=loggers['train_loop'])
+    train_logfunc = TrainLog()
+    train_log_bef = lambda self, result: None#train_logfunc._log_before
+    train_log_af = lambda self, result: None#train_logfunc._log_after
+    environment = make_environment(utils=utils, log_bef=train_log_bef, log_af=train_log_af)#, logger=loggers['train_loop'])
     environment_spec = specs.make_environment_spec(environment)
     if FLAGS.critic == 'c51':
         agent_networks = make_networks(action_spec=environment_spec.actions, max_time_steps=utils.num_period)
@@ -356,8 +361,6 @@ def main(argv):
         assert FLAGS.obj_func == 'cvar', 'IQN only support CVaR objective.'
         agent_networks = make_iqn_networks(action_spec=environment_spec.actions,cvar_th=FLAGS.threshold, max_time_steps=FLAGS.init_ttm)
 
-    utils.vol_kernel = vol_kernel
-    utils.volvol_kernel = volvol_kernel
 
     # Construct the agent.
     agent = D4PG(
@@ -377,7 +380,9 @@ def main(argv):
         policy_optimizer=snt.optimizers.Adam(FLAGS.lr),
         critic_optimizer=snt.optimizers.Adam(FLAGS.lr),
     )
-
+    utils.vol_kernel = agent._learner._observation_network.vol_kernel
+    utils.volvol_kernel = agent._learner._observation_network.volvol_kernel
+    
     # Create the environment loop used for training.
     if not FLAGS.eval_only:
         train_loop = acme.EnvironmentLoop(environment, agent, label='train_loop', logger=loggers['train_loop'])
@@ -404,16 +409,14 @@ def main(argv):
     print("Starting evaluation")
     # Create the evaluation actor and loop.
     eval_actor = actors.FeedForwardActor(policy_network=eval_policy)
-    # eval_utils = Utils(init_ttm=FLAGS.init_ttm, np_seed=FLAGS.eval_seed, num_sim=FLAGS.eval_sim, spread=FLAGS.spread, volvol=FLAGS.vov, sabr=FLAGS.sabr, gbm=FLAGS.gbm, hed_ttm=FLAGS.hed_ttm,
-    #                    init_vol=FLAGS.init_vol, poisson_rate=FLAGS.poisson_rate, 
-    #                    moneyness_mean=FLAGS.moneyness_mean, moneyness_std=FLAGS.moneyness_std, 
-    #                    mu=0.0, ttms=[int(ttm) for ttm in FLAGS.liab_ttms],
-    #                    action_low=float(FLAGS.action_space[0]), action_high=float(FLAGS.action_space[1]))
-    # TODO: FIND UD AF HVORFOR DEN TERMINERER UDEN AT EVALUATE
+  
     eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread)
-    eval_utils.vol_kernel = vol_kernel
-    eval_utils.volvol_kernel = volvol_kernel
-    eval_env = make_environment(utils=eval_utils, logger=make_logger(work_folder,'eval_env'))
+    eval_utils.vol_kernel = agent._learner._observation_network.vol_kernel
+    eval_utils.volvol_kernel = agent._learner._observation_network.volvol_kernel
+    eva_logfunc = EvalLog()
+    eval_log_bef = eva_logfunc._log_before
+    eval_log_af = eva_logfunc._log_after
+    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))
     eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])
     eval_loop.run(num_episodes=FLAGS.eval_sim)   
     print("Successfully finished.")

@@ -287,7 +287,6 @@ class D4PGLearner(acme.Learner):
         timestamp = time.time()
         elapsed_time = timestamp - self._timestamp if self._timestamp else 0
         self._timestamp = timestamp
-        tf.print(self._observation_network.vol_kernel.a)
         # Update our counts and record it.
         counts = self._counter.increment(steps=1, walltime=elapsed_time)
         fetches.update(counts)

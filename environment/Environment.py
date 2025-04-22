@@ -14,41 +14,64 @@ import numpy as np
 
 from environment.Trading import MainPortfolio, Greek, SwapKeys
 
-
+import tensorflow as tf
 
 @dataclasses.dataclass
 class StepResult:
     episode: int = 0
     t: int = 0
     swaption_action: float = 0.0
-    delta_action_hed: float = 0.0
-    
+    swap_action_hed: float = 0.0
+    swap_action_liab: float = 0.0
+
     cost_swaption_hed: float = 0.0
-    cost_swap: float = 0.0
-    
+    cost_swap_hed: float = 0.0
+    cost_swap_liab: float = 0.0
+
     step_pnl: float = 0.0
     step_pnl_hed_swaption: float = 0.0
     step_pnl_liab_swaption: float = 0.0
     step_pnl_hed_swap: float = 0.0
     step_pnl_liab_swap: float = 0.0
-    
-    
-    delta_local_hed_before_hedge: float = 0.0
-    delta_local_hed_after_hedge: float = 0.0
-    delta_local_liab_before_hedge: float = 0.0
-    delta_local_liab_after_hedge: float = 0.0
-    delta_before_hedge: float = 0.0
-    delta_after_hedge: float = 0.0
+
+    delta_local_hed_before: float = 0.0
+    delta_local_hed_after: float = 0.0
+    delta_local_liab_before: float = 0.0
+    delta_local_liab_after: float = 0.0
+    delta_before: float = 0.0
+    delta_after: float = 0.0
+
+    gamma_before: float = 0.0
+    gamma_after: float = 0.0
+    vega_before: float = 0.0
+    vega_after: float = 0.0
+
+    action_mag: float = 0.0
+    action_dir: float = 0.0
+    gamma_ratio: float = 0.0
+    vega_ratio: float = 0.0
 
 
-    gamma_before_hedge: float = 0.0
-    gamma_after_hedge: float = 0.0
-    vega_before_hedge: float = 0.0
-    vega_after_hedge: float = 0.0
+class TrainLog:
+    @staticmethod
+    def _log_before(self,result):
+        pass
+    @staticmethod
+    def _log_after(self,result):
+        pass
+class EvalLog:
+    @staticmethod
+    def _log_before(self, result):
+        
+            result.gamma_before, result.vega_before, result.delta_local_hed_before, result.delta_local_hed_before = self.portfolio.get_kernel_greek_risk()
+            result.delta_before = self.portfolio.get_delta(self.t)
+    @staticmethod
+    def _log_after(self, result):
 
-
-
-
+        self.portfolio.update_risk_vectors(self.t) # risk change following action
+        result.gamma_after, result.vega_after, result.delta_local_hed_after, result.delta_local_liab_after = self.portfolio.get_kernel_greek_risk()
+        result.delta_after = self.portfolio.get_delta(self.t) # portfolio delta
+        self.logger.write(dataclasses.asdict(result))
 
 class TradingEnv(gym.Env):
     """
@@ -56,10 +79,15 @@ class TradingEnv(gym.Env):
     """
 
     # trade_freq in unit of day, e.g 2: every 2 day; 0.5 twice a day;
-    def __init__(self, utils, logger: Optional[loggers.Logger] = None):
+    def __init__(self, utils, log_bef=None, log_af=None, logger: Optional[loggers.Logger] = None):
 
         super(TradingEnv, self).__init__()
+        self.log_bef = log_bef
+        self.log_af = log_af 
         self.logger = logger
+        self.logger_present = True if self.logger else False 
+        print("TRAINING WITH LOGGER:", self.logger_present)
+        print("")
         self.utils = utils
         # prepare portfolio and underlying iterables
         self.portfolio = MainPortfolio(utils)
@@ -72,18 +100,21 @@ class TradingEnv(gym.Env):
         self.num_period = hedge_mm.shape[1]
         self.sim_episode = -1
         self.t = None
-        # action: [swaption, swap1, swap2, swap3]
-        self.action_space = spaces.Box(low=np.zeros(7), high=np.ones(7), dtype=np.float32)
+        self.action_space = spaces.Box(
+            low=-np.inf,    
+            high=+np.inf,
+            shape=(7,),
+            dtype=np.float32
+        )
         # obs space bounds
-        # rate bounds from memmap
-
 
         self.observation_space = spaces.Box(
             low=-np.inf,    
             high=+np.inf,
-            shape=(322,),
+            shape=(323,),
             dtype=np.float32
         )
+
 
     def seed(self, seed):
         # set the np random seed
@@ -94,8 +125,9 @@ class TradingEnv(gym.Env):
         self.portfolio.reset(self.sim_episode)
         self.t = 0
         self.print_nanwarning = True
-        print("episode reset!", self.sim_episode)
+        #print("episode reset!", self.sim_episode)
         return self.portfolio.get_state(self.t)
+    
 
     def step(self, action):
         """
@@ -103,32 +135,36 @@ class TradingEnv(gym.Env):
         """
         t = self.t
         result = StepResult( episode=self.sim_episode, t=t)
-        result.action_mag, result.action_dir, result.gamma, result.vega, result.swaption_action, result.delta_action_hed, result.delta_action_liab = action
 
-        if self.print_nanwarning and np.isnan(action).any():
-            self.print_nanwarning = False
-            print(f"action is NaN! This warning is turned off until next episode")
-
+        result.action_mag, result.action_dir, result.gamma_ratio,result.vega_ratio,result.swaption_action, result.swap_action_hed, result.swap_action_liab = action
+        assert not np.isnan(action).any(), action
+        #if self.print_nanwarning and np.isnan(action).any():
+        #    self.print_nanwarning = False
+        #    print(f"action is NaN! This warning is turned off until next episode")
+        
+        #if self.logger: # dont waste resources
+        self.log_bef(self,result) 
         result.step_pnl = reward = self.portfolio.step(
             action_swaption_hed=result.swaption_action,
-            action_swap_hed=result.delta_action_hed,
-            action_swap_liab=result.delta_action_liab,
+            action_swap_hed=result.swap_action_hed,
+            action_swap_liab=result.swap_action_liab,
             t=self.t,
             result=result,
         )
-        
+
+        self.log_af(self,result)
+            
         self.t = self.t + 1
 
         state = self.portfolio.get_state(self.t)
         if self.t == self.num_period - 1:
             done = True
-            state[2:-1] = 0 # all all greeks to 0
-            #state[1:] = 0 this is handled in the tensors. 
+            state[7:] = 0 # all greeks to 0
+            state[:4] = 0
         else:
             done = False
         
 
         info = {"path_row": self.sim_episode}
-        if self.logger:
-            self.logger.write(dataclasses.asdict(result))
+            
         return state, reward, done, info

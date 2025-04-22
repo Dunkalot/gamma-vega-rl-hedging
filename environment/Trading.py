@@ -105,11 +105,9 @@ class Swaps(AssetInterface):
     def add(self, t: int, action_swap_hed: float, action_swap_liab: float):
         self.position_hed [t:, t] = action_swap_hed * self.utils.contract_size
         self.position_liab[t:, t] = action_swap_liab * self.utils.contract_size
-        price_hed  = self.active_path_hed [t, t, SwapKeys.PRICE]
-        price_liab = self.active_path_liab[t, t, SwapKeys.PRICE]
-        cost_hed   = -abs(self.utils.swap_spread * price_hed  * self.position_hed[t,t] )
-        cost_liab  = -abs(self.utils.swap_spread * price_liab * self.position_liab[t,t] )
-        return cost_hed + cost_liab
+        cost_hed   = -abs(self.utils.swap_spread   * self.position_hed[t,t] )
+        cost_liab  = -abs(self.utils.swap_spread * self.position_liab[t,t] )
+        return cost_hed, cost_liab
 
     def get_position_hed(self, t: int):
         return self.position_hed[t, t].copy()
@@ -259,7 +257,6 @@ class SwaptionLiabilityPortfolio(SwaptionPortfolio):
 
 
 
-
 class MainPortfolio(AssetInterface):
     """Main Portfolio
     This is the total portfolio contains three components:
@@ -398,6 +395,23 @@ class MainPortfolio(AssetInterface):
         """portfolio vega at time t"""
         return self.compute_local_sensitivity(self.get_vega_vec(t), t)
     
+    def update_kernel_delta_vector(self,t):
+        self.delta_vector[52-t:] = self.get_delta_vec(t)[:53+t]
+        return self.delta_vector
+
+    def update_kernel_gamma_vector(self,t):
+        self.gamma_vector[52-t:] = self.get_gamma_vec(t)[:53+t]
+        return self.gamma_vector
+    
+    def update_kernel_vega_vector(self,t):
+        self.vega_vector[52-t:] = self.get_vega_vec(t)[:53+t]
+        return self.vega_vector
+
+    def update_risk_vectors(self,t):
+        self.update_kernel_gamma_vector(t)
+        self.update_kernel_vega_vector(t)
+        self.update_kernel_delta_vector(t)
+        
 
     def reset(self, sim_episode: int):
         """Reset all components at the beginning of episode `sim_episode`."""
@@ -412,6 +426,8 @@ class MainPortfolio(AssetInterface):
         self.gamma_vector[:] = np.float32(0.)
         self.delta_vector[:] = np.float32(0.)
         self.vega_vector[:]  = np.float32(0.)
+        # prime the delta vector
+        
 
     
     def get_state(self, t: int) -> np.ndarray:
@@ -419,56 +435,36 @@ class MainPortfolio(AssetInterface):
         rate_liab  = self.underlying.get_rate_liab(t)  
 
         # scale sensitivities by the number of contracts that will be bought
-        gamma_unit_hed  = self.hed_port.get_gamma(t, position_scale=False, single_value=True) * self.utils.contract_size
-        vega_unit_hed = self.hed_port.get_vega(t,position_scale=False, single_value=True) * self.utils.contract_size
+        gamma_unit_hed  = self.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size
+        vega_unit_hed = self.hed_port._base_options[t,t,Greek.VEGA] * self.utils.contract_size
         delta_unit_hed  = self.underlying.active_path_hed[t, t, SwapKeys.DELTA] * self.utils.contract_size
         delta_unit_liab = self.underlying.active_path_liab[t, t, SwapKeys.DELTA] * self.utils.contract_size
-        
-        state = np.array([
-            gamma_unit_hed,
-            vega_unit_hed,
-            delta_unit_hed,
-            delta_unit_liab,
-            t*self.dt, 
-            rate_hed, 
-            rate_liab, 
-            
-        ], dtype=np.float32)
+        delta_unit_hed_swaption = self.hed_port._base_options[t,t,Greek.DELTA]
+        state = np.array([gamma_unit_hed, vega_unit_hed, delta_unit_hed_swaption, delta_unit_hed,delta_unit_liab,
+                        t*self.dt,  rate_hed, rate_liab], dtype=np.float32)
 
-        
+        self.update_risk_vectors(t)
 
-        self.gamma_vector[52-t:] = self.get_gamma_vec(t)[:53+t]
-        self.vega_vector[52-t:] = self.get_vega_vec(t)[:53+t]
-        self.delta_vector[52-t:] = self.get_delta_vec(t)[:53+t]
         state = np.concatenate([state, self.gamma_vector, self.vega_vector, self.delta_vector])
         return state.astype(np.float32)
 
-    def make_kernel_delta_vector(self,t):
-        delta_vector = np.zeros(105)
-        delta_vector[52-t:] = self.get_delta_vec(t)[:53+t]
-        return delta_vector
 
-    def make_kernel_gamma_vector(self,t):
-        gamma_vector = np.zeros(105)
-        gamma_vector[52-t:] = self.get_gamma_vec(t)[:53+t]
-        return gamma_vector
+    def get_kernel_greek_risk(self):
+        vol_kernel = self.utils.vol_kernel
+        volvol_kernel = self.utils.volvol_kernel
+        
+        gamma_local, delta_local_hed = vol_kernel(np.concatenate([self.gamma_vector[None,:],self.delta_vector[None,:]]))
+        vega_local = volvol_kernel(self.vega_vector)
+        delta_local_liab = vol_kernel(self.delta_vector, anchor_index=104)
+        return gamma_local, vega_local, delta_local_hed, delta_local_liab
     
-    def make_kernel_vega_vector(self,t):
-        vega_vector = np.zeros(105)
-        vega_vector[52-t:] = self.get_vega_vec(t)[:53+t]
-        return vega_vector
-
+    
     def step(self, action_swaption_hed, action_swap_hed, action_swap_liab, t: int, result):
         """Apply actions, compute PnL and reward at time t."""
         
-        result.delta_local_hed_before = self.utils.vol_kernel(self.make_kernel_delta_vector(t))
-        #tf.print(self.utils.vol_kernel(np.arange(105)))
-        result.delta_local_liab_before = self.utils.vol_kernel(self.make_kernel_delta_vector(t))
 
-        # hedging swaption cost
-        # underlying swap rebalancing
         result.cost_swaption_hed = self.hed_port.add(t, action_swaption_hed)
-        result.cost_swap = self.underlying.add(t, action_swap_hed, action_swap_liab)
+        result.cost_swap_hed, result.cost_swap_liab = self.underlying.add(t, action_swap_hed, action_swap_liab)
        
         
 
@@ -481,10 +477,13 @@ class MainPortfolio(AssetInterface):
 
         reward = (
             result.cost_swaption_hed +
-            result.cost_swap +
+            result.cost_swap_hed +
+            result.cost_swap_liab +
             result.step_pnl_hed_swaption  +
             result.step_pnl_liab_swaption +
             result.step_pnl_hed_swap +
             result.step_pnl_liab_swap
         )
+        
+   
         return np.float32(reward)
