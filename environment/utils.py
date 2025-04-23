@@ -48,7 +48,7 @@ class Utils:
             swap_hedge_expiry=swap_hedge_expiry,
             swap_client_expiry=swap_client_expiry
         )
-        self.contract_size = np.float32(100)
+        self.contract_size = np.float32(1)
         print("!!!! CONTRACT SIZE IS ", self.contract_size)
         self.swap_spread = np.float32(swap_spread)
         self.spread = np.float32(spread)

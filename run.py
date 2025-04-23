@@ -247,13 +247,13 @@ def make_quantile_networks(
 
     # Create the policy network.
     internal_action_spec = specs.BoundedArray(
-        shape=(4,),   # e.g. [a_mag, a_dir]
+        shape=(2,),   # e.g. [a_mag, a_dir]
         dtype=np.float32,
-        minimum=[0.0, 0.0, 0.0, 0.0],
-        maximum=[1.0, 1.0, 1.0, 1.0],
+        minimum=[0.0, 0.0],
+        maximum=[1.0, 1.0],
         name="internal_action",
         )
-    internal_action_dim = 4
+    internal_action_dim = 2
     
     base_policy = snt.Sequential([
         networks.LayerNormMLP(policy_layer_sizes, activate_final=True),
@@ -411,8 +411,8 @@ def main(argv):
     eval_actor = actors.FeedForwardActor(policy_network=eval_policy)
   
     eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread)
-    eval_utils.vol_kernel = agent._learner._observation_network.vol_kernel
-    eval_utils.volvol_kernel = agent._learner._observation_network.volvol_kernel
+    eval_utils.vol_kernel = agent._learner._target_observation_network.vol_kernel
+    eval_utils.volvol_kernel = agent._learner._target_observation_network.volvol_kernel
     eva_logfunc = EvalLog()
     eval_log_bef = eva_logfunc._log_before
     eval_log_af = eva_logfunc._log_after

@@ -105,7 +105,7 @@ class TradingEnv(gym.Env):
         self.action_space = spaces.Box(
             low=-np.inf,    
             high=+np.inf,
-            shape=(9,),
+            shape=(7,),
             dtype=np.float32
         )
         # obs space bounds
@@ -138,14 +138,16 @@ class TradingEnv(gym.Env):
         t = self.t
         result = StepResult( episode=self.sim_episode, t=t)
 
-        result.action_gamma, result.action_vega, result.action_swap_hed_mag, result.action_swap_liab_mag, result.gamma_ratio ,result.vega_ratio,result.action_swaption, result.action_swap_hed, result.action_swap_liab = action
+        result.action_gamma, result.action_vega, result.gamma_ratio ,result.vega_ratio,result.action_swaption, result.action_swap_hed, result.action_swap_liab = action
         assert not np.isnan(action).any(), action
         #if self.print_nanwarning and np.isnan(action).any():
         #    self.print_nanwarning = False
         #    print(f"action is NaN! This warning is turned off until next episode")
         
         #if self.logger: # dont waste resources
+
         self.log_bef(self,result) 
+        print(f"Delta local hed should be reduced by {result.delta_local_hed_before* self.portfolio.underlying.active_path_hed[t,t,SwapKeys.DELTA]} + {self.utils.vol_kernel.weight_single()} so with a delta of ")
         result.step_pnl = reward = self.portfolio.step(
             action_swaption_hed=result.action_swaption,
             action_swap_hed=result.action_swap_hed,

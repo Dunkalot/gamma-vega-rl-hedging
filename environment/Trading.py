@@ -428,7 +428,15 @@ class MainPortfolio(AssetInterface):
         self.vega_vector[:]  = np.float32(0.)
         # prime the delta vector
         
-
+    
+    def get_kernel_greek_risk(self):
+        vol_kernel = self.utils.vol_kernel
+        volvol_kernel = self.utils.volvol_kernel
+        
+        gamma_local, delta_local_hed = vol_kernel(np.concatenate([self.gamma_vector[None,:],self.delta_vector[None,:]]))
+        vega_local = volvol_kernel(self.vega_vector)
+        delta_local_liab = vol_kernel(self.delta_vector, anchor_index=104)
+        return gamma_local, vega_local, delta_local_hed, delta_local_liab
     
     def get_state(self, t: int) -> np.ndarray:
         rate_hed   = self.underlying.get_rate_hed(t)
@@ -449,14 +457,6 @@ class MainPortfolio(AssetInterface):
         return state.astype(np.float32)
 
 
-    def get_kernel_greek_risk(self):
-        vol_kernel = self.utils.vol_kernel
-        volvol_kernel = self.utils.volvol_kernel
-        
-        gamma_local, delta_local_hed = vol_kernel(np.concatenate([self.gamma_vector[None,:],self.delta_vector[None,:]]))
-        vega_local = volvol_kernel(self.vega_vector)
-        delta_local_liab = vol_kernel(self.delta_vector, anchor_index=104)
-        return gamma_local, vega_local, delta_local_hed, delta_local_liab
     
     
     def step(self, action_swaption_hed, action_swap_hed, action_swap_liab, t: int, result):
@@ -467,7 +467,7 @@ class MainPortfolio(AssetInterface):
         result.cost_swap_hed, result.cost_swap_liab = self.underlying.add(t, action_swap_hed, action_swap_liab)
        
         
-
+        
         # PnL contributions
         result.step_pnl_hed_swaption  = self.hed_port.step(t)
         result.step_pnl_liab_swaption = self.liab_port.step(t)
