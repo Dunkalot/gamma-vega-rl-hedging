@@ -147,7 +147,6 @@ class TradingEnv(gym.Env):
         #if self.logger: # dont waste resources
 
         self.log_bef(self,result) 
-        print(f"Delta local hed should be reduced by {result.delta_local_hed_before* self.portfolio.underlying.active_path_hed[t,t,SwapKeys.DELTA]} + {self.utils.vol_kernel.weight_single()} so with a delta of ")
         result.step_pnl = reward = self.portfolio.step(
             action_swaption_hed=result.action_swaption,
             action_swap_hed=result.action_swap_hed,

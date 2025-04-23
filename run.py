@@ -329,6 +329,36 @@ def load_policy(policy_network, checkpoint_folder):
         var.assign(
             trainable_variables_snapshot[var_name_wo_name_scope])
 
+def save_agent(policy_network, observation_network, checkpoint_folder):
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    policy_snapshot = make_snapshot(policy_network)
+    observation_snapshot = make_snapshot(observation_network)
+    policy_save_path = f"{checkpoint_folder}/policy_{timestamp}"
+    observation_save_path = f"{checkpoint_folder}/observation_{timestamp}"
+    tf.saved_model.save(policy_snapshot, policy_save_path)
+    tf.saved_model.save(observation_snapshot, observation_save_path)
+    print(f"Policy and observation networks saved to {policy_save_path} and {observation_save_path}")
+
+def load_agent(policy_network, observation_network, checkpoint_folder):
+    trainable_variables_snapshot = {}
+    load_policy_net = tf.saved_model.load(checkpoint_folder+'/policy')
+    load_observation_net = tf.saved_model.load(checkpoint_folder+'/observation')
+    for var in load_policy_net.trainable_variables:
+        trainable_variables_snapshot['/'.join(
+            var.name.split('/')[1:])] = var.numpy()
+    for var in policy_network.trainable_variables:
+        var_name_wo_name_scope = '/'.join(var.name.split('/')[1:])
+        var.assign(
+            trainable_variables_snapshot[var_name_wo_name_scope])
+    trainable_variables_snapshot = {}
+    for var in load_observation_net.trainable_variables:
+        trainable_variables_snapshot['/'.join(
+            var.name.split('/')[1:])] = var.numpy()
+    for var in observation_network.trainable_variables:
+        var_name_wo_name_scope = '/'.join(var.name.split('/')[1:])
+        var.assign(
+            trainable_variables_snapshot[var_name_wo_name_scope])
+
 def main(argv):
     
     if FLAGS.per == True:
@@ -386,16 +416,17 @@ def main(argv):
     # Create the environment loop used for training.
     if not FLAGS.eval_only:
         train_loop = acme.EnvironmentLoop(environment, agent, label='train_loop', logger=loggers['train_loop'])
-        train_loop.run(num_episodes=FLAGS.train_sim)    
-        save_policy(agent._learner._policy_network, f'./logs/{RUN_FOLDER}/{work_folder}')
+        train_loop.run(num_episodes=FLAGS.train_sim)
+        save_agent(agent._learner._policy_network, agent._learner._observation_network, f'./logs/{RUN_FOLDER}/{work_folder}')
 
     # Create the evaluation policy.
     if FLAGS.eval_only:
         policy_net = agent._learner._policy_network
+        observation_net = agent._learner._observation_network
         if FLAGS.agent_path == '':
-            load_policy(policy_net, f'./logs/{RUN_FOLDER}/{work_folder}')
+            load_agent(policy_net, observation_net, f'./logs/{RUN_FOLDER}/{work_folder}')
         else:
-            load_policy(policy_net, FLAGS.agent_path)
+            load_agent(policy_net, observation_net, FLAGS.agent_path)
         eval_policy = snt.Sequential([
             agent_networks['observation'],
             policy_net,
