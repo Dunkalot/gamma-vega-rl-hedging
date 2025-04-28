@@ -26,44 +26,41 @@ import os
 from pathlib import Path
 import pickle
 @njit
-def _simulate_core(f_sim, k_mat, g_mat, h_mat, phi_mat, rho_mat, dZ_f, dW_s, n_steps, dt, tau, rev_short, rev_ids, ttm_mat, beta):
-    for t in range(n_steps-1):
+def _simulate_core(f_sim, k_mat, g_mat, h_mat, phi_mat, rho_mat,
+                   dZ_f, dW_s, n_steps, dt, tau,
+                   rev_short, rev_ids, ttm_mat, beta,
+                   sub_steps=1):
+    for t in range((n_steps  - 1)* sub_steps):
         drift_sum = 0.0
         for short_i, canon_i in zip(rev_short, rev_ids):
-            if ttm_mat[t, canon_i] + tau + 1e-8 < 0:
+            if ttm_mat[t // sub_steps, canon_i] + tau + 1e-8 < 0:
                 continue
-            
-            
-            g_it = g_mat[t, canon_i]
-            h_it = h_mat[t, canon_i]
-            k_it = k_mat[t, canon_i]
 
-            f_t = f_sim[t, canon_i]
-            k_t = k_mat[t, canon_i]
+            g_it = g_mat[t // sub_steps, canon_i]
+            h_it = h_mat[t // sub_steps, canon_i]
+            k_it = k_mat[t // sub_steps, canon_i]
+
+            f_t = f_sim[t // sub_steps, canon_i]
+            k_t = k_mat[t // sub_steps, canon_i]
             f_beta = f_t ** beta
-            
-            gkfb   = g_it * k_it * f_beta
-            phk   = phi_mat[short_i, short_i]*h_it * k_it
 
-            
-            # calculate drift
-            drift_f  = -gkfb * drift_sum
+            gkfb = g_it * k_it * f_beta
+            phk = phi_mat[short_i, short_i] * h_it * k_it
+
+            drift_f = -gkfb * drift_sum
             drift_k = -phk * drift_sum
-            #print(drift_f, drift_k)
-            
 
-            # calculate change
-            df     = drift_f * dt + f_beta * g_it * k_it * dZ_f[t, short_i] # already multiplied by sqrt(dt)
-            dk     = drift_k * dt + h_it * k_it * dW_s[t, short_i] # already multiplied by sqrt(dt)
-            
-            # update values
-            f_new  = f_t + df
-            k_new  = k_t + dk
+            df = drift_f * dt + f_beta * g_it * k_it * dZ_f[t, short_i]
+            dk = drift_k * dt + h_it * k_it * dW_s[t, short_i]
 
+            f_new = f_t + df
+            k_new = k_t + dk
 
-            f_sim[t+1, canon_i] = f_new if f_new > 0 else 1e-4
-            k_mat[t+1, canon_i] = k_new if k_new > 0 else 1e-4
-            
+            if t % sub_steps == 0:
+                idx = t // sub_steps + 1
+                f_sim[idx, canon_i] = f_new if f_new > 0 else 1.e-6
+                k_mat[idx, canon_i] = k_new if k_new > 0 else 1.e-6
+
             if short_i > 0:
                 corr = rho_mat[short_i-1, short_i] * tau * gkfb / (1 + tau * f_t)
                 drift_sum += corr
@@ -1002,7 +999,7 @@ def sample_positive_rebonato_params(n_samples=1,max_allowed = 0.1, seed=None, vo
     vol_funcs = []
     
     while len(valid_params) < n_samples:
-        state = 0#rng.choice([0, 1], p=[0.5, 0.5])
+        state = 1#rng.choice([0, 1], p=[0.5, 0.5])
         if volvol:
             # Define bounds for low and high states
             low_bounds = {'a': 0.5, 'b': 0.0002, 'c': 1.9, 'd': 0.27}
@@ -1062,6 +1059,7 @@ class LMMSABR:
         
         
     ):
+        
         self.samples = None
         self.tau = tau
         self.resolution = resolution
@@ -1146,15 +1144,19 @@ class LMMSABR:
         phi_batch, phi_meta = sample_phi_matrix_batch(T, n_samples, **phi_kwargs)
         g_params, _ = sample_positive_rebonato_params(n_samples=n_samples, seed=seed, **g_kwargs)
         h_params, _ = sample_positive_rebonato_params(n_samples=n_samples, volvol=True, seed=seed, **h_kwargs)
+        if n_curves == None:
+            print(f"n_curves is none, setting n_curves to {n_samples=}")
+            n_curves = n_samples
         if random_curves:
-            fwd_samples = sample_forward_curves(df_fwd, n=n_samples if n_curves == None else n_curves, **fwd_kwargs)
+            fwd_samples = sample_forward_curves(df_fwd, n=n_curves, **fwd_kwargs)
         else:
+            
             print("random_curves set to False, using the first n_curves of the dataframe")
             df_fwd_idx = df_fwd.index[:n_curves]
             fwd_samples = df_fwd.loc[df_fwd_idx, df_fwd.columns[:-2]].values
-        
+        print(f"creating df init for {n_curves=}")
         self.df_init_list = [create_df_init_from_forward(fwd, resolution=self.resolution, tau=self.tau) for fwd in fwd_samples]
-        
+        print("done creating df_init")
         self.samples = [
             {
                 "rho_mat": rho_batch[i],
@@ -1493,19 +1495,28 @@ class LMMSABR:
 
     
     def simulate_forwards(self, seed=None, minimum_starting_rate=0.01):
-        np.random.seed(seed)
-        dt = self.dt
-        dt_sqrt = np.sqrt(dt)
+        # initialize RNG
+        sub_steps = self.sub_steps
+        rng    = np.random.default_rng(seed)
+        m      = self.num_forwards
+        n      = self.n_steps - 1
+        dt     = self.dt
+        dt_sub = dt / sub_steps
+        # build joint covariance and draw all shocks at once
+        top    = np.hstack([self.rho_mat[:m, :m],      self.phi_mat[:m, :m]])
+        bottom = np.hstack([self.phi_mat[:m, :m].T,    self.theta_mat[:m, :m]])
+        Sigma_sub  = np.vstack([top, bottom]) * dt_sub
 
-        self.dZ_f = np.random.multivariate_normal(
-            np.zeros(self.num_forwards),
-            self.rho_mat[:self.num_forwards, :self.num_forwards],
-            self.n_steps-1) * dt_sqrt
-        
-        self.dW_s = np.random.multivariate_normal(
-            np.zeros(self.num_forwards),
-            self.theta_mat[:self.num_forwards, :self.num_forwards],
-            self.n_steps-1) * dt_sqrt
+        # one call to MVN: shape = (n, 2m)
+        all_shocks = rng.multivariate_normal(
+            mean = np.zeros(2*m),
+            cov  = Sigma_sub,
+            size = n * sub_steps
+        )
+
+        # slice into dZ_f and dW_s
+        self.dZ_f = all_shocks[:, :m]
+        self.dW_s = all_shocks[:,  m:]
 
         f_0 = self.df_init["Forward"].values
         # shift f_0 up by the difference between the minimum starting rate and the minimum starting rate
@@ -1548,7 +1559,8 @@ class LMMSABR:
             rev_short=rev_short, 
             rev_ids=rev_idx, 
             ttm_mat=self.ttm_mat, 
-            beta=self.beta
+            beta=self.beta,
+            sub_steps=self.sub_steps
         )
     
     def _interpolate_vol(self):
@@ -1564,7 +1576,8 @@ class LMMSABR:
 
         
 
-    def simulate(self, shuffle_df=True,seed=None,minimum_starting_rate=0.01):
+    def simulate(self, shuffle_df=True,seed=None,minimum_starting_rate=0.01, sub_steps = 2):
+        self.sub_steps = sub_steps
         #start_time = time.time()
         self.prepare_curves(shuffle_df=shuffle_df, seed=seed)
         self.precompute_instant_vol()
