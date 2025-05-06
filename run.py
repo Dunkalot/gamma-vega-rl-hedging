@@ -247,13 +247,13 @@ def make_quantile_networks(
 
     # Create the policy network.
     internal_action_spec = specs.BoundedArray(
-        shape=(2,),   # e.g. [a_mag, a_dir]
+        shape=(1,),   # e.g. [a_mag, a_dir]
         dtype=np.float32,
-        minimum=[0.0, 0.0],
-        maximum=[1.0, 1.0],
+        minimum=[0.0],
+        maximum=[1.0],
         name="internal_action",
         )
-    internal_action_dim = 2
+    internal_action_dim = 1
     
     base_policy = snt.Sequential([
         networks.LayerNormMLP(policy_layer_sizes, activate_final=True),

@@ -122,11 +122,23 @@ class Utils:
             dtype=np.float32, mode='r',
             shape=(n_episodes, T1, T2)
         )
+        cov_hed = np.memmap(
+            os.path.join(data_dir, 'cov_hed.dat'),
+            dtype=np.float32, mode='r',
+            shape=(n_episodes, T1, T2)
+        )
+        cov_liab = np.memmap(
+            os.path.join(data_dir, 'cov_liab.dat'),
+            dtype=np.float32, mode='r',
+            shape=(n_episodes, T1, T2)
+        )
         return (
             hedge_swaption_mm,
             liab_swaption_mm,
             hedge_swap_mm,
             liab_swap_mm,
-            net_direction_mm
+            net_direction_mm,
+            cov_hed,
+            cov_liab
         )
         

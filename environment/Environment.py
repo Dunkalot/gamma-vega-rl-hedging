@@ -105,7 +105,7 @@ class TradingEnv(gym.Env):
         self.action_space = spaces.Box(
             low=-np.inf,    
             high=+np.inf,
-            shape=(7,),
+            shape=(1),
             dtype=np.float32
         )
         # obs space bounds

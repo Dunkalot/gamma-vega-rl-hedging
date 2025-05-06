@@ -1,4 +1,5 @@
 #load libraries
+import cloudpickle
 import math
 import numpy as np
 import warnings
@@ -319,22 +320,15 @@ def pairwise_outer(arr):
     return arr[..., :, None] * arr[..., None, :]
 
 
-def sample_phi_diag_mvn(T, mean=-0.5, sigma=0.1, beta=0.1, clip_bounds=(-0.9, -0.3)):
-    """
-    Sample diagonal of phi matrix (rate-vol correlation) using a multivariate normal, with vectorized covariance computation.
-    """
-    T = np.asarray(T)
-    n = len(T)
-
-    # Efficiently compute the covariance using the outer difference
-    diff = np.subtract.outer(T, T)
-    cov = sigma**2 * np.exp(-beta * np.abs(diff))
-
-    # Draw from MVN with specified mean and covariance
-    phi_diag = np.random.multivariate_normal(mean=np.full(n, mean), cov=cov)
-
-    # Clip to valid correlation bounds
-    return np.clip(phi_diag, clip_bounds[0], clip_bounds[1])
+def sample_phi_diag_mvn(
+    T,
+    rho0=-0.65,
+    rho_inf=-0.5,
+    Tc=1.0
+):
+    # rho for sabr rho not the matrix rho
+    T = np.asarray(T, dtype=float)
+    return rho_inf + (rho0 - rho_inf) * np.exp(-T / Tc)
 
 
 def build_phi_matrix(T, phi_diag, lambda3, lambda4):
@@ -360,12 +354,10 @@ def build_phi_matrix(T, phi_diag, lambda3, lambda4):
 
 def sample_phi_matrix(
     T, 
-    mean=-0.5, 
-    sigma=0.1, 
-    beta_corr=0.1, 
+    phi_short=-0.65, 
+    phi_long=-0.3,  
     lambda3_range=(0.005, 0.05), 
     lambda4_range=(0.01, 0.07), 
-    clip_bounds=(-0.9, -0.3)
 ):
     """
     Sample a full phi matrix, with rate-vol correlation structure for caplets.
@@ -381,7 +373,7 @@ def sample_phi_matrix(
     - metadata dict with sampled values
     """
     # Sample diagonal from MVN
-    phi_diag = sample_phi_diag_mvn(T, mean, sigma, beta_corr, clip_bounds)
+    phi_diag = sample_phi_diag_mvn(T, phi_short, phi_long)
 
     # Sample asymmetric exponential decay parameters
     lambda3 = np.random.uniform(*lambda3_range)
@@ -896,12 +888,10 @@ def min_max_rebonato_vol(params, max_allowed=np.inf):
 def sample_phi_matrix_batch(
     T,
     n_samples=100,
-    mean=-0.5,
-    sigma=0.1,
-    beta_corr=0.1,
+    phi_short=-0.65,
+    phi_long=-0.5,
     lambda3_range=(0.005, 0.05),
-    lambda4_range=(0.01, 0.07),
-    clip_bounds=(-0.9, -0.3)
+    lambda4_range=(0.01, 0.07)
 ):
     """
     Generate a batch of phi matrices with realistic rate-vol correlation structure.
@@ -916,12 +906,10 @@ def sample_phi_matrix_batch(
     for _ in range(n_samples):
         phi, meta = sample_phi_matrix(
             T,
-            mean=mean,
-            sigma=sigma,
-            beta_corr=beta_corr,
+            phi_long=phi_long,
+            phi_short=phi_short,
             lambda3_range=lambda3_range,
             lambda4_range=lambda4_range,
-            clip_bounds=clip_bounds
         )
         phi_matrices.append(phi)
         metadata_list.append(meta)
@@ -968,6 +956,61 @@ def sample_exponential_corr_matrix_batch(
 
     return matrices, meta_list
 
+import numpy as np
+
+def sample_doust_corr_matrix_batch(
+    T,
+    n_samples=100,
+    beta_range=(0.5, 5.0),
+    gamma_range=(0.5, 2.0)
+):
+    """
+    Batch sampler for Doust‐style (multiplicative) correlation matrices.
+
+    Parameters:
+    - T: array of tenor times (only used to get the matrix size)
+    - n_samples: number of matrices to generate
+    - beta_range: (min, max) for β in a_k = exp(-β / k^γ)
+    - gamma_range: (min, max) for γ in a_k = exp(-β / k^γ)
+
+    Returns:
+    - List of n×n correlation matrices
+    - List of metadata dicts with 'beta' and 'gamma'
+    """
+    n = len(T)
+
+    # 1) draw all β, γ
+    beta  = np.random.uniform(*beta_range,  size=n_samples)
+    gamma = np.random.uniform(*gamma_range, size=n_samples)
+
+    # 2) build the k = 1..n-1 index vector and its 1/k^γ values for each sample
+    k = np.arange(1, n)                               # shape (n-1,)
+    inv_pow = k[None, :]**(-gamma[:, None])           # (n_samples, n-1)
+
+    # 3) prefix‐sum over k to get c_m = sum_{r=1..m-1} 1/r^γ
+    c_partial = np.cumsum(inv_pow, axis=1)            # (n_samples, n-1)
+    c_all     = np.concatenate(
+                  [np.zeros((n_samples,1)),         # c[0]=0
+                   c_partial], axis=1)               # → (n_samples, n)
+
+    # 4) build the |c_j - c_i| array for each sample via broadcast
+    diff = np.abs(c_all[:, :, None] - c_all[:, None, :])  # (n_samples, n, n)
+
+    # 5) exponentiate: ρ_{ij} = exp(-β * diff)
+    corr_stack = np.exp(-beta[:, None, None] * diff)      # (n_samples, n, n)
+
+    # 6) package results
+    matrices = [corr_stack[s] for s in range(n_samples)]
+    meta_list = [
+        {'beta': float(beta[s]), 'gamma': float(gamma[s])}
+        for s in range(n_samples)
+    ]
+
+    return matrices, meta_list
+
+
+
+
 
 def create_df_inits_from_samples(tau=0.5, resolution=2, n_samples=100):
     df_fwd = compute_6m_forward_dataframe(make_nss_yield_df())
@@ -976,7 +1019,7 @@ def create_df_inits_from_samples(tau=0.5, resolution=2, n_samples=100):
     return df_init_list
 
 
-def sample_positive_rebonato_params(n_samples=1,max_allowed = 0.1, seed=None, volvol=False):
+def sample_positive_rebonato_params(n_samples=1,max_allowed = 100, seed=None, volvol=False,params=None):
     """
     Generate Rebonato parameter sets (a, b, c, d) such that the corresponding vol surface is strictly positive.
 
@@ -994,52 +1037,58 @@ def sample_positive_rebonato_params(n_samples=1,max_allowed = 0.1, seed=None, vo
     vol_funcs : list of callables
         List of functions vol(tau) = sigma(tau) with those parameters.
     """
-    rng = np.random.default_rng(seed)
     valid_params = []
     vol_funcs = []
-    
-    while len(valid_params) < n_samples:
-        state = 1#rng.choice([0, 1], p=[0.5, 0.5])
-        if volvol:
-            # Define bounds for low and high states
-            low_bounds = {'a': 0.5, 'b': 0.0002, 'c': 1.9, 'd': 0.27}
-            high_bounds = {'a': 1.1, 'b': 0.00021, 'c': 2.3, 'd': 0.3}
+    if not params:
+        rng = np.random.default_rng(seed)
+        
+        
+        while len(valid_params) < n_samples:
+            state = 0#rng.choice([0, 1], p=[0.5, 0.5])
+            if volvol:
+                # Define bounds for low and high states
+                low_bounds = {'a': 0.5, 'b': 0.0002, 'c': 1.9, 'd': 0.27}
+                high_bounds = {'a': 1.1, 'b': 0.00021, 'c': 2.3, 'd': 0.3}
 
-            # Randomly choose state (0 for low, 1 for high) with probability p=0.5
-            if state == 0:  # Low bound state
-                a = rng.uniform(low_bounds['a'], low_bounds['a'] + 0.1)
-                b = rng.uniform(low_bounds['b'], low_bounds['b'] + 0.00001)
-                c = rng.uniform(low_bounds['c'], low_bounds['c'] + 0.1)
-                d = rng.uniform(low_bounds['d'], low_bounds['d'] + 0.01)
-            else:  # High bound state
-                a = rng.uniform(high_bounds['a'] - 0.1, high_bounds['a'])
-                b = rng.uniform(high_bounds['b'] - 0.00001, high_bounds['b'])
-                c = rng.uniform(high_bounds['c'] - 0.1, high_bounds['c'])
-                d = rng.uniform(high_bounds['d'] - 0.01, high_bounds['d'])
-        else:
-            # Define bounds for low and high states
-            low_bounds = {'a': 0.0, 'b': 0.02, 'c': 0.5, 'd': 0.02}
-            high_bounds = {'a': 0.04, 'b': 0.15, 'c': 1.2, 'd': 0.026}
+                # Randomly choose state (0 for low, 1 for high) with probability p=0.5
+                if state == 0:  # Low bound state
+                    a = rng.uniform(low_bounds['a'], low_bounds['a'] + 0.1)
+                    b = rng.uniform(low_bounds['b'], low_bounds['b'] + 0.00001)
+                    c = rng.uniform(low_bounds['c'], low_bounds['c'] + 0.1)
+                    d = rng.uniform(low_bounds['d'], low_bounds['d'] + 0.01)
+                else:  # High bound state
+                    a = rng.uniform(high_bounds['a'] - 0.1, high_bounds['a'])
+                    b = rng.uniform(high_bounds['b'] - 0.00001, high_bounds['b'])
+                    c = rng.uniform(high_bounds['c'] - 0.1, high_bounds['c'])
+                    d = rng.uniform(high_bounds['d'] - 0.01, high_bounds['d'])
+            else:
+                # Define bounds for low and high states
+                low_bounds = {'a': 0.0, 'b': 0.02, 'c': 0.5, 'd': 0.02}
+                high_bounds = {'a': 0.04, 'b': 0.15, 'c': 1.2, 'd': 0.026}
 
-            # Randomly choose state (0 for low, 1 for high) with probability p=0.5
-            if state == 0:  # Low bound state
-                a = rng.uniform(low_bounds['a'], low_bounds['a'] + 0.01)
-                b = rng.uniform(low_bounds['b'], low_bounds['b'] + 0.01)
-                c = rng.uniform(low_bounds['c'], low_bounds['c'] + 0.1)
-                d = rng.uniform(low_bounds['d'], low_bounds['d'] + 0.002)
-            else:  # High bound state
-                a = rng.uniform(high_bounds['a'] - 0.01, high_bounds['a'])
-                b = rng.uniform(high_bounds['b'] - 0.01, high_bounds['b'])
-                c = rng.uniform(high_bounds['c'] - 0.1, high_bounds['c'])
-                d = rng.uniform(high_bounds['d'] - 0.002, high_bounds['d'])
-        param_set = (a, b, c, d)
+                # Randomly choose state (0 for low, 1 for high) with probability p=0.5
+                if state == 0:  # Low bound state
+                    a = rng.uniform(low_bounds['a'], low_bounds['a'] + 0.01)
+                    b = rng.uniform(low_bounds['b'], low_bounds['b'] + 0.01)
+                    c = rng.uniform(low_bounds['c'], low_bounds['c'] + 0.1)
+                    d = rng.uniform(low_bounds['d'], low_bounds['d'] + 0.002)
+                else:  # High bound state
+                    a = rng.uniform(high_bounds['a'] - 0.01, high_bounds['a'])
+                    b = rng.uniform(high_bounds['b'] - 0.01, high_bounds['b'])
+                    c = rng.uniform(high_bounds['c'] - 0.1, high_bounds['c'])
+                    d = rng.uniform(high_bounds['d'] - 0.002, high_bounds['d'])
+            param_set = (a, b, c, d)
 
-        # Check positivity
-        min_val,max_val, _, is_valid = min_max_rebonato_vol(param_set,max_allowed=max_allowed)
-        if is_valid:
-            valid_params.append(param_set)
-            vol_funcs.append(partial(get_instant_vol_func, params=param_set))
-
+            # Check positivity
+            min_val,max_val, _, is_valid = min_max_rebonato_vol(param_set,max_allowed=max_allowed)
+            if is_valid:
+                valid_params.append(param_set)
+                vol_funcs.append(partial(get_instant_vol_func, params=param_set))
+    else:
+        # there could be smarter logic for this, but this works for now
+        for sample in range(n_samples):
+            vol_funcs.append(partial(get_instant_vol_func, params=params))
+            valid_params.append(params)
     return valid_params, vol_funcs
 
 
@@ -1109,16 +1158,17 @@ class LMMSABR:
         n_samples=1,
         n_curves=None,
         random_curves = False,
-        rho_kwargs=None,
-        theta_kwargs=None,
-        phi_kwargs=None,
-        g_kwargs=None,
-        h_kwargs=None,
+        rho_kwargs={'beta_range':(0.2020,0.2020), 'gamma_range':(1.5456,1.5456)},
+        theta_kwargs={'beta_range':( 0.0465, 0.0465), 'gamma_range':( 0.4417, 0.4417)},
+        phi_kwargs={'lambda3_range': (0.0087931,0.0087931), 'lambda4_range': (0.051319,0.051319)},
+        g_kwargs={'params':(-0.013,0.0287,0.5272,0.0268)},
+        h_kwargs={'params':(0.5727,0.0002,2.3035,0.2757)},
         fwd_kwargs=None,
         seed=None,
     ):
         """
-        Sample and store LMM SABR starting conditions.
+        Sample and store LMM SABR starting conditions. defaults to rebonato and mckay's 
+        LMMSABR example parameters used in the LMMSABR book. g and h are the "normal day" parameters
 
         Parameters:
         - n_samples: number of samples
@@ -1134,13 +1184,13 @@ class LMMSABR:
         rho_kwargs = rho_kwargs or {}
         theta_kwargs = theta_kwargs or {}
         phi_kwargs = phi_kwargs or {}
-        g_kwargs = g_kwargs or {'max_allowed': 0.2}
-        h_kwargs = h_kwargs or {'max_allowed': 1.0}
+        g_kwargs = g_kwargs or {}
+        h_kwargs = h_kwargs or {}
         fwd_kwargs = fwd_kwargs or {}
         
         self.df_fwd = df_fwd
-        rho_batch, rho_meta = sample_exponential_corr_matrix_batch(T, n_samples, **rho_kwargs)
-        theta_batch, theta_meta = sample_exponential_corr_matrix_batch(T, n_samples, **theta_kwargs)
+        rho_batch, rho_meta = sample_doust_corr_matrix_batch(T, n_samples, **rho_kwargs)
+        theta_batch, theta_meta = sample_doust_corr_matrix_batch(T, n_samples, **theta_kwargs)
         phi_batch, phi_meta = sample_phi_matrix_batch(T, n_samples, **phi_kwargs)
         g_params, _ = sample_positive_rebonato_params(n_samples=n_samples, seed=seed, **g_kwargs)
         h_params, _ = sample_positive_rebonato_params(n_samples=n_samples, volvol=True, seed=seed, **h_kwargs)
@@ -1577,6 +1627,9 @@ class LMMSABR:
         
 
     def simulate(self, shuffle_df=True,seed=None,minimum_starting_rate=0.01, sub_steps = 2):
+        """use more substeps in more volatilie regimes.
+        Signs there are too few substeps are rates reaching the 0 absorbing boundary often. 
+        plot f_sim to check."""
         self.sub_steps = sub_steps
         #start_time = time.time()
         self.prepare_curves(shuffle_df=shuffle_df, seed=seed)
@@ -1672,14 +1725,15 @@ class LMMSABR:
 
         
         V_terms = rho_tensor*theta_tensor*W_tensor_prod*k_tensor_prod*self.ggh_tensor
+        self.V_terms = V_terms
         V_sum = np.sum(V_terms, axis=(2, 3))
         V_numerator = np.sqrt(2*V_sum)
         V_denominator = sigma*self.ttm_mat[np.ix_(swap_idxs_0, swap_idxs_1)]
         V = np.divide(
             V_numerator, 
             V_denominator,
-            out=np.zeros_like(numerator)*np.nan,  # fill result with 0 where denominator == 0
-            where=denominator != 0
+            out=np.full_like(V_numerator, np.nan),  # fill result with 0 where denominator == 0
+            where=V_denominator != 0
         )
         # print shape of all component tensors
         #print(f"V_terms shape: {V_terms.shape}, V_sum shape: {V_sum.shape}, V_numerator shape: {V_numerator.shape}, V_denominator shape: {V_denominator.shape}")
@@ -1692,9 +1746,12 @@ class LMMSABR:
         # SWAP INDEX EXPIRY OFFSET
         swap_hedge_expiry_relative_idx = self.t_to_idx(self.swap_hedge_expiry_relative)
         swap_liab_expiry_relative_idx = self.t_to_idx(self.swap_liab_expiry_relative)
-
         
-
+        self.alpha = sigma
+        self.phi = phi
+        self.V = V
+        self.k_tensor_prod = np.sum(k_tensor_prod, axis=(2, 3))
+        self.ggh_tensor_prod = np.sum(self.ggh_tensor, axis=(2, 3))
         ttm_mat = self.ttm_mat[np.ix_(swap_idxs_0, swap_idxs_1)]
         def risk_metrics(offset):
             atm_strikes = self.swap_sim.diagonal(offset=offset)
@@ -1885,6 +1942,74 @@ class LMMSABR:
         # angle so we look down from above
         ax.view_init(elev=45, azim=210)
     
+
+    def generate_cov(self, offset = 0):
+        
+        # 0) unpack
+        idx        = self.swap_indices[1]    # shape (S,J,2)
+        rho        = self.rho_mat            # shape (N,N)
+        sigma_all  = self.s_mat_interp       # shape (S,N)
+        f_all      = self.f_sim              # shape (S,N)
+        beta       = self.beta               # scalar
+        W_all      = self.W                  # shape (S,J,2)
+
+        # dimensions
+        S, J = idx.shape[0], idx.shape[1]
+        steps = np.arange(S)
+
+        # 1) main/port indices
+        #    main_idx[s] = the two forwards for swap(s,s)
+        main_idx = idx[steps, offset + steps, :]     # shape (S,2)
+        #    port_idx[s,j] = the two forwards for swap(s,j)
+        port_idx = idx                      # shape (S,J,2)
+
+        # 2) build 4-corners index blocks of shape (S,J,2,2)
+        main_exp = np.broadcast_to(
+            main_idx[:, None, :, None],     # (S,1,2,1)
+            (S, J, 2, 2)
+        )
+        port_exp = np.broadcast_to(
+            port_idx[:, :, None, :],        # (S,J,1,2)
+            (S, J, 2, 2)
+        )
+
+        # 3) gather all 4 correlations per (s,j)
+        rho_block = rho[main_exp, port_exp]  # → shape (S,J,2,2)
+
+        # 4) full forward vols = σ * (f^β)
+        vol_all = sigma_all * (f_all[:,:-26] ** beta)  # (S, N)
+
+        # 5) pull out & broadcast vols into (S,J,2,2)
+        vol_main_vec = vol_all[steps[:,None], main_idx]      # (S,2)
+        vol_port_vec = vol_all[steps[:,None,None], port_idx] # (S,J,2)
+
+        vol_main = np.broadcast_to(
+            vol_main_vec[:, None, :, None],  # (S,1,2,1)
+            (S, J, 2, 2)
+        )
+        vol_port = np.broadcast_to(
+            vol_port_vec[:, :, :, None],     # (S,J,2,1)
+            (S, J, 2, 2)
+        )
+
+        # 6) pull out & broadcast weights into (S,J,2,2)
+        w_main_vec = W_all[steps, offset + steps, :]                # (S,2)
+        w_port_vec = W_all                                # (S,J,2)
+
+        w_main = np.broadcast_to(
+            w_main_vec[:, None, :, None],  # (S,1,2,1)
+            (S, J, 2, 2)
+        )
+        w_port = np.broadcast_to(
+            w_port_vec[:, :, :, None],     # (S,J,2,1)
+            (S, J, 2, 2)
+        )
+
+        # 7) build all 4 contributions & sum over the two “leg” axes
+        cov_contrib = rho_block * vol_main * vol_port * w_main * w_port  # (S,J,2,2)
+        covs_all    = cov_contrib.sum(axis=(2,3))                         # (S,J)
+        return covs_all
+
     
 
     def generate_episodes(
@@ -1902,7 +2027,7 @@ class LMMSABR:
         # prepare output directory
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         assert self.primed, "You must call prime() before generating episodes."
-
+        assert len(self.df_init_list) > 10, "it is highly recommended to use a diverse set of starting forward curves."
         # 1) sample one episode to get per-episode shapes
         self.simulate(seed=0)
         self.get_swap_matrix()
@@ -1923,12 +2048,15 @@ class LMMSABR:
         total6   = (n_episodes, *shape6)
         total5   = (n_episodes, *shape5)
         total_nd = (n_episodes, T, T)
+        total_covs = (n_episodes, T, 2*T)
 
         mm_h   = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swaption_hed.dat",   mode="w+", dtype=save_dtype, shape=total6)
         mm_l   = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swaption_liab.dat", mode="w+", dtype=save_dtype, shape=total6)
         mm_hs  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swap_hedge.dat",     mode="w+", dtype=save_dtype, shape=total5)
         mm_ls  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swap_liab.dat",      mode="w+", dtype=save_dtype, shape=total5)
         mm_nd  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/net_direction.dat",  mode="w+", dtype=save_dtype, shape=total_nd)
+        mm_cov_hed  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/cov_hed.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
+        mm_cov_liab  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/cov_liab.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
 
         # 4) loop over episodes in blocks, with tqdm
         for start in tqdm(range(0, n_episodes, block),
@@ -1950,6 +2078,8 @@ class LMMSABR:
             ld_b = np.empty((b, *shape6), dtype=save_dtype)
             hs_b = np.empty((b, *shape5), dtype=save_dtype)
             ls_b = np.empty((b, *shape5), dtype=save_dtype)
+            cov_hed_b = np.empty((b, T,2*T), dtype=save_dtype)
+            cov_liab_b = np.empty((b, T,2*T), dtype=save_dtype)
 
             # fill buffers
             for i in range(b):
@@ -1957,28 +2087,36 @@ class LMMSABR:
                 self.simulate(seed=ep_idx)
                 self.get_swap_matrix()
                 (h_sh, h_sw), (l_sh, l_sw) = self.get_sabr_params()
+                self.generate_cov()
                 hd_b[i] = np.nan_to_num(h_sh).astype(save_dtype)
                 ld_b[i] = np.nan_to_num(l_sh).astype(save_dtype)
                 hs_b[i] = np.nan_to_num(h_sw).astype(save_dtype)
                 ls_b[i] = np.nan_to_num(l_sw).astype(save_dtype)
+                cov_hed_b[i] = np.nan_to_num(self.generate_cov())
+                cov_liab_b[i] = np.nan_to_num(self.generate_cov(offset=T))
+
 
             # write and flush this block
-            mm_h  [start:start+b] = hd_b
-            mm_l  [start:start+b] = ld_b
-            mm_hs [start:start+b] = hs_b
-            mm_ls [start:start+b] = ls_b
-            mm_nd [start:start+b] = nd_block
+            mm_h        [start:start+b] = hd_b
+            mm_l        [start:start+b] = ld_b
+            mm_hs       [start:start+b] = hs_b
+            mm_ls       [start:start+b] = ls_b
+            mm_nd       [start:start+b] = nd_block
+            mm_cov_hed  [start:start+b] = cov_hed_b
+            mm_cov_liab [start:start+b] = cov_liab_b
 
             mm_h .flush()
             mm_l .flush()
             mm_hs.flush()
             mm_ls.flush()
             mm_nd.flush()
+            mm_cov_hed.flush()
+            mm_cov_liab.flush()
 
         # 5) pickle the LMMModel state for later reuse
         pickle_path = Path(timestamped_out_dir) / "lmm_samples.pkl"
         with open(pickle_path, "wb") as f:
-            pickle.dump(self.samples, f)
+            cloudpickle.dump(self.samples, f)
 
         print(f"All episodes streamed to disk in '{timestamped_out_dir}'.")
         print(f"LMMM samples list of dicts saved to '{pickle_path}'.")

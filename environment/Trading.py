@@ -4,7 +4,7 @@ FLAGS = flags.FLAGS
 import numpy as np
 from enum import IntEnum
 import tensorflow as tf
-
+import numba
 
 class AssetInterface(ABC):
     """Asset Interface
@@ -285,39 +285,14 @@ class MainPortfolio(AssetInterface):
         self.underlying = Swaps(hedge_swap, liab_swap, utils=utils)  # WE USING SWAPS INSTEAD
         self.kernel_beta = np.float32(1.0) # standard deviation of the kernel
         self.use_rbf_kernel = False
+        # idx for hed and liab
+        self.anchor_hed = tf.int32(52)
+        self.anchor_liab = tf.int32(self.anchor_hed * 2)
+        
         self.gamma_vector = np.zeros(105, dtype=np.float32)
         self.vega_vector = np.zeros(105, dtype=np.float32)
         self.delta_vector = np.zeros(105, dtype=np.float32)
 
-        print("Main portfolio initialized with kernel beta of ", self.kernel_beta, " using" , ("rbf kernel" if self.use_rbf_kernel else "triangle kernel") if self.kernel_beta > 0 else "no kernel")
-        print("REMEMBER TO ADD BACK THE SENSITIVITY FOR LIAB AND HEDGE WHEN USING THE RBF KERNEL")
-        assert self.use_rbf_kernel == False, "RBF kernel logic not yet implemented, there needs to be a system for accounting for cross-sensitivity of delta hedges with swaps with the get_hed_liab_relative_sensitivity func"
-        assert self.kernel_beta > 0, "are you sure you want to run without kernel?"
-        self.kernel = (self.rbf_kernel if self.use_rbf_kernel else self.triangle_kernel) if self.kernel_beta >0 else lambda t, vec_len: np.ones(vec_len, dtype=np.float32)
-    # -------------- kernel helpers ---------------
-    def rbf_kernel(self, center_idx, vector_len):
-        if self.kernel_beta <= 0:
-            return np.ones(vector_len, dtype=np.float32)
-        indices = np.arange(vector_len, dtype=np.float32)
-        distances = (indices - center_idx) * self.utils.dt
-        return np.exp(-(distances ** 2) / (2 * self.kernel_beta ** 2), dtype=np.float32)
-
-    def triangle_kernel(self, center_idx, vector_len):
-        indices = np.arange(vector_len, dtype=np.float32)
-        half_len = np.float32(vector_len / 2)
-        distances = np.abs(indices - center_idx)
-        return np.float32(np.clip(1 - distances / half_len, 0, 1))
-
-    def compute_local_sensitivity(self, vec, t):
-        weights = self.kernel(t, len(vec))
-        return np.dot(weights, vec)
-
-    def get_kernel_sensitivity(self, idx, idx_perpective) -> float:
-        """function that compus the sensitivity to the value at idx the perspective of the idx_perspective using the current kernel on a single value"""
-        if self.kernel_beta <= 0:
-            return 1
-        kernel = (self.rbf_kernel if self.use_rbf_kernel else self.triangle_kernel)(idx_perpective, int(2 * self.utils.swap_shape[0]))[idx]
-        return kernel
 
 
 
@@ -345,13 +320,13 @@ class MainPortfolio(AssetInterface):
         delta = np.sum(self.get_delta_vec(t))
         return delta
     
-    def get_delta_local_hed(self, t):
-        """compute the delta around the hedging swaption expiry"""
-        return self.compute_local_sensitivity(self.get_delta_vec(t), t)
+    # def get_delta_local_hed(self, t):
+    #     """compute the delta around the hedging swaption expiry"""
+    #     return self.compute_local_sensitivity(self.get_delta_vec(t), t)
     
-    def get_delta_local_liab(self, t):
-        """Compute the delta around the liability swaption expiry"""
-        return self.compute_local_sensitivity(self.get_delta_vec(t), t+self.liab_offset_idx)
+    # def get_delta_local_liab(self, t):
+    #     """Compute the delta around the liability swaption expiry"""
+    #     return self.compute_local_sensitivity(self.get_delta_vec(t), t+self.liab_offset_idx)
     
     def get_hed_liab_relative_sensitivity(self, t,scalar):
         """Compute the delta sensitivity of the liability swaption to the hedging swaption delta"""
@@ -428,42 +403,69 @@ class MainPortfolio(AssetInterface):
         self.vega_vector[:]  = np.float32(0.)
         # prime the delta vector
         
+    def get_kernel_delta_hed(self):
+        return self.utils.vol_kernel(self.delta_vector)
+
+    def get_kernel_delta_liab(self):
+        return self.utils.vol_kernel(self.delta_vector, anchor_index=104)
+
+    def get_kernel_gamma_hed(self):
+        return self.utils.vol_kernel(self.gamma_vector, gamma=True)
     
     def get_kernel_greek_risk(self):
         vol_kernel = self.utils.vol_kernel
-        volvol_kernel = self.utils.volvol_kernel
-        
         gamma_local, delta_local_hed = vol_kernel(np.concatenate([self.gamma_vector[None,:],self.delta_vector[None,:]]))
-        vega_local = volvol_kernel(self.vega_vector)
         delta_local_liab = vol_kernel(self.delta_vector, anchor_index=104)
-        return gamma_local, vega_local, delta_local_hed, delta_local_liab
+        return gamma_local, delta_local_hed, delta_local_liab
     
     def get_state(self, t: int) -> np.ndarray:
         rate_hed   = self.underlying.get_rate_hed(t)
-        rate_liab  = self.underlying.get_rate_liab(t)  
+        #rate_liab  = self.underlying.get_rate_liab(t)  
 
         # scale sensitivities by the number of contracts that will be bought
         gamma_unit_hed  = self.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size
         vega_unit_hed = self.hed_port._base_options[t,t,Greek.VEGA] * self.utils.contract_size
-        delta_unit_hed  = self.underlying.active_path_hed[t, t, SwapKeys.DELTA] * self.utils.contract_size
-        delta_unit_liab = self.underlying.active_path_liab[t, t, SwapKeys.DELTA] * self.utils.contract_size
-        delta_unit_hed_swaption = self.hed_port._base_options[t,t,Greek.DELTA] * self.utils.contract_size
-        state = np.array([gamma_unit_hed, vega_unit_hed, delta_unit_hed_swaption, delta_unit_hed,delta_unit_liab,
-                        t*self.dt,  rate_hed, rate_liab], dtype=np.float32)
-
+        #delta_unit_hed  = self.underlying.active_path_hed[t, t, SwapKeys.DELTA] * self.utils.contract_size
+        #delta_unit_liab = self.underlying.active_path_liab[t, t, SwapKeys.DELTA] * self.utils.contract_size
+        #delta_unit_hed_swaption = self.hed_port._base_options[t,t,Greek.DELTA] * self.utils.contract_size
         self.update_risk_vectors(t)
+        gamma_port = self.get_kernel_gamma_hed()
+        
+        state = np.array([rate_hed,vega_unit_hed, gamma_unit_hed, gamma_port,
+                        t*self.dt], dtype=np.float32)
 
-        state = np.concatenate([state, self.gamma_vector, self.vega_vector, self.delta_vector])
+        
+        #state = np.concatenate([state, self.gamma_vector, self.vega_vector, self.delta_vector])
         return state.astype(np.float32)
 
 
+    @numba.njit
+    @staticmethod
+    def solve_2x2_numba(a, b, c, d, e, f):
+        det = a*d - b*c
+        # optionally handle det == 0   
+        return ( ( e*d - b*f ) / det,
+                ( a*f - e*c ) / det )
     
-    
-    def step(self, action_swaption_hed, action_swap_hed, action_swap_liab, t: int, result):
+    def step(self, action_swaption_hed, t: int, result):
         """Apply actions, compute PnL and reward at time t."""
-        
+        delta_unit_hed  = self.underlying.active_path_hed[t, t, SwapKeys.DELTA] * self.utils.contract_size
+        delta_unit_liab = self.underlying.active_path_liab[t, t, SwapKeys.DELTA] * self.utils.contract_size
 
         result.cost_swaption_hed = self.hed_port.add(t, action_swaption_hed)
+        self.update_kernel_delta_vector()
+        # swaption is added, we now know the full delta vector that needs to be neutralized
+        k12_raw = self.utils.vol_kernel.weight_single(self.anchor_hed, target_idx=self.anchor_liab)
+        k21_raw = self.utils.vol_kernel.weight_single(self.anchor_liab, target_idx=self.anchor_hed)
+        
+        delta_local_hed = self.get_kernel_delta_hed()
+        delta_local_liab = self.get_kernel_delta_liab()
+        action_swap_hed_delta, action_swap_liab_delta = MainPortfolio.solve_2x2_numba(1.,k12_raw, k21_raw,1., delta_local_hed, delta_local_liab)
+
+
+        action_swap_hed = action_swap_hed_delta / delta_unit_hed
+        action_swap_liab = action_swap_liab_delta / delta_unit_liab
+
         result.cost_swap_hed, result.cost_swap_liab = self.underlying.add(t, action_swap_hed, action_swap_liab)
        
         
