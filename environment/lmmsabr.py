@@ -24,6 +24,7 @@ from tqdm import tqdm
 from numba import njit, prange
 import psutil
 import os
+from sklearn.model_selection import train_test_split
 from pathlib import Path
 import pickle
 @njit
@@ -1200,7 +1201,6 @@ class LMMSABR:
         if random_curves:
             fwd_samples = sample_forward_curves(df_fwd, n=n_curves, **fwd_kwargs)
         else:
-            
             print("random_curves set to False, using the first n_curves of the dataframe")
             df_fwd_idx = df_fwd.index[:n_curves]
             fwd_samples = df_fwd.loc[df_fwd_idx, df_fwd.columns[:-2]].values
@@ -1506,11 +1506,12 @@ class LMMSABR:
         return G_tensor[idxs]
 
 
-    def prepare_curves(self, shuffle_df=False, seed=None):
+    def prepare_curves(self, shuffle_df=True, seed=None):
         np.random.seed(seed)
         if shuffle_df:
             self.df_init = self.df_init_list[np.random.randint(len(self.df_init_list))]
         else:
+            print("RANDOM CURVES SET TO FALSE! SAMPLING ONLY THE FIRST CURVE EACH TIME")
             self.df_init = self.df_init
         self.df_init: pd.DataFrame = self.df_init.query(f"Tenor <= {self.t_max + 1e-6}")
         self.tenors = self.df_init["Tenor"].values
@@ -1797,7 +1798,7 @@ class LMMSABR:
                 where=~np.isnan(swap_value[1:, :]) & ~np.isnan(swap_value[:-1, :])
             )
 
-            return np.stack([price, delta, gamma, vega, swaption_pnl, active], axis=-1), np.stack([swap_value, swap_pnl, active, annuity_ofs, swap_sim_ofs], axis=-1)
+            return np.stack([price, delta, gamma, vega, swaption_pnl, iv], axis=-1), np.stack([swap_value, swap_pnl, annuity_ofs, swap_sim_ofs], axis=-1)
         
         
         hedge_metrics = risk_metrics(swap_hedge_expiry_relative_idx)
@@ -1807,68 +1808,49 @@ class LMMSABR:
 
 
     def sabr_implied_vol(self,
-    F: np.ndarray,
-    K: np.ndarray,
-    T: np.ndarray,
-    alpha: np.ndarray,
-    beta: float,
-    rho: np.ndarray,
-    nu: np.ndarray,
+        F, K, T, alpha, beta: float, rho, nu, atol=1e-12
     ):
-        """
-        Hagan SABR implied vol (not just ATM) with numpy broadcasting.
-
-        Parameters
-        ----------
-        F : np.ndarray
-            Forward swap rate (e.g., shape (steps, expiries))
-        K : np.ndarray
-            Strike rate (same shape as F for ATM, or broadcastable)
-        T : np.ndarray
-            Time to maturity in years
-        alpha : np.ndarray
-            Instantaneous vol (sigma0 in SABR)
-        beta : float
-            Elasticity parameter
-        rho : np.ndarray
-            SABR correlation
-        nu : np.ndarray
-            SABR vol-of-vol
-
-        Returns
-        -------
-        np.ndarray
-            SABR implied vol, same shape as inputs
-        """
-        F = np.maximum(F, 1e-8)
-        K = np.maximum(K, 1e-8)
-        T = np.maximum(T, 1e-8)
+        F, K, T, alpha, rho, nu = map(
+            lambda x: np.asarray(x, dtype=float), (F, K, T, alpha, rho, nu)
+        )
+        F  = np.maximum(F, 1e-8)
+        K  = np.maximum(K, 1e-8)
+        T  = np.maximum(T, 1e-12)
         log_FK = np.log(F / K)
-        z = (nu / alpha) * (F * K) ** ((1 - beta) / 2) * log_FK
-        x_z = np.log((np.sqrt(1 - 2 * rho * z + z ** 2) + z - rho) / (1 - rho))
-
-        # A and B terms
         FK_beta = (F * K) ** ((1 - beta) / 2)
-        A = alpha / (FK_beta * (1 + (1 - beta) ** 2 * log_FK ** 2 / 24 + (1 - beta) ** 4 * log_FK ** 4 / 1920))
-        B = (
-            1
-            + ((1 - beta) ** 2 / 24) * (alpha ** 2 / FK_beta ** 2)
-            + (rho * beta * nu * alpha) / (4 * FK_beta)
-            + ((2 - 3 * rho ** 2) * nu ** 2 / 24)
-        ) * T
 
-        # ATM simplified case
-        atm_mask = np.isclose(F, K)
-        sigma = np.full_like(F, np.nan)
-        sigma[atm_mask] = (
-            alpha[atm_mask]
-            / (F[atm_mask] ** (1 - beta))
-            * (1 + ((2 - 3 * rho[atm_mask] ** 2) / 24) * nu[atm_mask] ** 2 * T[atm_mask])
+        z   = (nu / alpha) * FK_beta * log_FK
+        rho = np.clip(rho, -0.999, 0.999)          # avoid |ρ|→1 blow‑ups
+        x_z = np.log((np.sqrt(1 - 2*rho*z + z*z) + z - rho) / (1 - rho))
+
+        tol   = 1e-6
+        small = np.abs(z) < tol
+
+        # allocate output
+        ratio = np.empty_like(z, dtype=float)
+
+        # small-z branch: use the 2nd-order expansion
+        ratio[small] = (
+            1
+            - rho[small] * z[small] / 2
+            + ((2 - 3 * rho[small]**2) * z[small]**2) / 24
         )
 
-        # General case
-        non_atm = ~atm_mask
-        sigma[non_atm] = A[non_atm] * z[non_atm] / x_z[non_atm] * B[non_atm]
+        # off-ATM: safe division
+        ratio[~small] = z[~small] / x_z[~small]
+
+        A = alpha / FK_beta / (
+                1 + (1 - beta)**2 * log_FK**2 / 24
+                + (1 - beta)**4 * log_FK**4 / 1920
+            )
+
+        B = 1 + (
+                (1 - beta)**2 * alpha**2 / (24 * FK_beta**2)
+            + rho * beta * nu * alpha / (4 * FK_beta)
+            + (2 - 3*rho**2) * nu**2 / 24
+            ) * T
+
+        sigma = A * ratio * B
 
         return sigma
 
@@ -1919,7 +1901,7 @@ class LMMSABR:
         price[expiry_mask] = annuity[expiry_mask] * np.maximum(F[expiry_mask] - K[expiry_mask], 0)
         delta = annuity * norm.cdf(d1)
         gamma = annuity * n_prime / (F * sigma * sqrt_T)
-        vega = annuity * F * n_prime * sqrt_T / 100  # divide by 100 for % vol bump
+        vega = annuity * F * n_prime * sqrt_T 
 
         return price, delta, gamma, vega
 
@@ -1943,72 +1925,45 @@ class LMMSABR:
         ax.view_init(elev=45, azim=210)
     
 
-    def generate_cov(self, offset = 0):
-        
-        # 0) unpack
-        idx        = self.swap_indices[1]    # shape (S,J,2)
-        rho        = self.rho_mat            # shape (N,N)
-        sigma_all  = self.s_mat_interp       # shape (S,N)
-        f_all      = self.f_sim              # shape (S,N)
-        beta       = self.beta               # scalar
-        W_all      = self.W                  # shape (S,J,2)
+    def compute_regression_betas(self, offset=0):
+        idx_all = self.swap_indices[1]
+        rho = self.rho_mat
+        sigma_all = self.s_mat_interp
+        f_all = self.f_sim
+        beta = self.beta
+        W_all = self.W
 
-        # dimensions
-        S, J = idx.shape[0], idx.shape[1]
+        S, J, K = idx_all.shape
         steps = np.arange(S)
 
-        # 1) main/port indices
-        #    main_idx[s] = the two forwards for swap(s,s)
-        main_idx = idx[steps, offset + steps, :]     # shape (S,2)
-        #    port_idx[s,j] = the two forwards for swap(s,j)
-        port_idx = idx                      # shape (S,J,2)
+        f_for_vol = f_all[:, :-self.resolution]
+        vol_all = sigma_all * (f_for_vol ** beta)
 
-        # 2) build 4-corners index blocks of shape (S,J,2,2)
-        main_exp = np.broadcast_to(
-            main_idx[:, None, :, None],     # (S,1,2,1)
-            (S, J, 2, 2)
-        )
-        port_exp = np.broadcast_to(
-            port_idx[:, :, None, :],        # (S,J,1,2)
-            (S, J, 2, 2)
-        )
+        main_leg_indices = idx_all[steps, offset + steps, :]
+        port_leg_indices = idx_all
 
-        # 3) gather all 4 correlations per (s,j)
-        rho_block = rho[main_exp, port_exp]  # → shape (S,J,2,2)
+        rho_block = rho[
+            main_leg_indices[:, None, :, None],
+            port_leg_indices[:, :, None, :]
+        ]
+        vol_main_legs = vol_all[steps[:, None], main_leg_indices]
+        vol_port_legs = vol_all[steps[:, None, None], port_leg_indices]
 
-        # 4) full forward vols = σ * (f^β)
-        vol_all = sigma_all * (f_all[:,:-26] ** beta)  # (S, N)
+        w_main_legs = W_all[steps, offset + steps, :]
+        w_port_legs = W_all
 
-        # 5) pull out & broadcast vols into (S,J,2,2)
-        vol_main_vec = vol_all[steps[:,None], main_idx]      # (S,2)
-        vol_port_vec = vol_all[steps[:,None,None], port_idx] # (S,J,2)
-
-        vol_main = np.broadcast_to(
-            vol_main_vec[:, None, :, None],  # (S,1,2,1)
-            (S, J, 2, 2)
-        )
-        vol_port = np.broadcast_to(
-            vol_port_vec[:, :, :, None],     # (S,J,2,1)
-            (S, J, 2, 2)
+        cov_contrib = (
+            rho_block
+            * vol_main_legs[:, None, :, None]
+            * vol_port_legs[:, :, None, :]
+            * w_main_legs[:, None, :, None]
+            * w_port_legs[:, :, None, :]
         )
 
-        # 6) pull out & broadcast weights into (S,J,2,2)
-        w_main_vec = W_all[steps, offset + steps, :]                # (S,2)
-        w_port_vec = W_all                                # (S,J,2)
+        covs_all = cov_contrib.sum(axis=(2, 3))
+        diag_covs = covs_all[steps, offset + steps]
 
-        w_main = np.broadcast_to(
-            w_main_vec[:, None, :, None],  # (S,1,2,1)
-            (S, J, 2, 2)
-        )
-        w_port = np.broadcast_to(
-            w_port_vec[:, :, :, None],     # (S,J,2,1)
-            (S, J, 2, 2)
-        )
-
-        # 7) build all 4 contributions & sum over the two “leg” axes
-        cov_contrib = rho_block * vol_main * vol_port * w_main * w_port  # (S,J,2,2)
-        covs_all    = cov_contrib.sum(axis=(2,3))                         # (S,J)
-        return covs_all
+        return covs_all / diag_covs[:, None]
 
     
 
@@ -2027,7 +1982,7 @@ class LMMSABR:
         # prepare output directory
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         assert self.primed, "You must call prime() before generating episodes."
-        assert len(self.df_init_list) > 10, "it is highly recommended to use a diverse set of starting forward curves."
+        assert len(self.df_init_list) > 10, "you need a diverse set of starting curves"
         # 1) sample one episode to get per-episode shapes
         self.simulate(seed=0)
         self.get_swap_matrix()
@@ -2041,7 +1996,8 @@ class LMMSABR:
 
         # 2) create timestamped subdirectory
         timestamp = time.strftime("%Y%m%d-%H%M%S")
-        timestamped_out_dir = f"{out_dir}/{timestamp}"
+        base_dir = f"{out_dir}/{timestamp}"
+        timestamped_out_dir = f"{base_dir}_{self.tenor}y"
         Path(timestamped_out_dir).mkdir(parents=True, exist_ok=True)
 
         # 3) pre-allocate memmap files with float32 dtype
@@ -2050,13 +2006,13 @@ class LMMSABR:
         total_nd = (n_episodes, T, T)
         total_covs = (n_episodes, T, 2*T)
 
-        mm_h   = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swaption_hed.dat",   mode="w+", dtype=save_dtype, shape=total6)
-        mm_l   = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swaption_liab.dat", mode="w+", dtype=save_dtype, shape=total6)
-        mm_hs  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swap_hedge.dat",     mode="w+", dtype=save_dtype, shape=total5)
-        mm_ls  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/swap_liab.dat",      mode="w+", dtype=save_dtype, shape=total5)
-        mm_nd  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/net_direction.dat",  mode="w+", dtype=save_dtype, shape=total_nd)
-        mm_cov_hed  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/cov_hed.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
-        mm_cov_liab  = np.memmap(f"{timestamped_out_dir}_{self.tenor}y/cov_liab.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
+        mm_h   = np.memmap(f"{timestamped_out_dir}/swaption_hed.dat",   mode="w+", dtype=save_dtype, shape=total6)
+        mm_l   = np.memmap(f"{timestamped_out_dir}/swaption_liab.dat", mode="w+", dtype=save_dtype, shape=total6)
+        mm_hs  = np.memmap(f"{timestamped_out_dir}/swap_hedge.dat",     mode="w+", dtype=save_dtype, shape=total5)
+        mm_ls  = np.memmap(f"{timestamped_out_dir}/swap_liab.dat",      mode="w+", dtype=save_dtype, shape=total5)
+        mm_nd  = np.memmap(f"{timestamped_out_dir}/net_direction.dat",  mode="w+", dtype=save_dtype, shape=total_nd)
+        mm_reg_hed  = np.memmap(f"{timestamped_out_dir}/cov_hed.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
+        mm_reg_liab  = np.memmap(f"{timestamped_out_dir}/cov_liab.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
 
         # 4) loop over episodes in blocks, with tqdm
         for start in tqdm(range(0, n_episodes, block),
@@ -2078,8 +2034,8 @@ class LMMSABR:
             ld_b = np.empty((b, *shape6), dtype=save_dtype)
             hs_b = np.empty((b, *shape5), dtype=save_dtype)
             ls_b = np.empty((b, *shape5), dtype=save_dtype)
-            cov_hed_b = np.empty((b, T,2*T), dtype=save_dtype)
-            cov_liab_b = np.empty((b, T,2*T), dtype=save_dtype)
+            reg_hed_b = np.empty((b, T,2*T), dtype=save_dtype)
+            reg_liab_b = np.empty((b, T,2*T), dtype=save_dtype)
 
             # fill buffers
             for i in range(b):
@@ -2087,13 +2043,13 @@ class LMMSABR:
                 self.simulate(seed=ep_idx)
                 self.get_swap_matrix()
                 (h_sh, h_sw), (l_sh, l_sw) = self.get_sabr_params()
-                self.generate_cov()
+                self.compute_regression_betas()
                 hd_b[i] = np.nan_to_num(h_sh).astype(save_dtype)
                 ld_b[i] = np.nan_to_num(l_sh).astype(save_dtype)
                 hs_b[i] = np.nan_to_num(h_sw).astype(save_dtype)
                 ls_b[i] = np.nan_to_num(l_sw).astype(save_dtype)
-                cov_hed_b[i] = np.nan_to_num(self.generate_cov())
-                cov_liab_b[i] = np.nan_to_num(self.generate_cov(offset=T))
+                reg_hed_b[i] = np.nan_to_num(self.compute_regression_betas())
+                reg_liab_b[i] = np.nan_to_num(self.compute_regression_betas(offset=T))
 
 
             # write and flush this block
@@ -2102,21 +2058,21 @@ class LMMSABR:
             mm_hs       [start:start+b] = hs_b
             mm_ls       [start:start+b] = ls_b
             mm_nd       [start:start+b] = nd_block
-            mm_cov_hed  [start:start+b] = cov_hed_b
-            mm_cov_liab [start:start+b] = cov_liab_b
+            mm_reg_hed  [start:start+b] = reg_hed_b
+            mm_reg_liab [start:start+b] = reg_liab_b
 
             mm_h .flush()
             mm_l .flush()
             mm_hs.flush()
             mm_ls.flush()
             mm_nd.flush()
-            mm_cov_hed.flush()
-            mm_cov_liab.flush()
+            mm_reg_hed.flush()
+            mm_reg_liab.flush()
 
         # 5) pickle the LMMModel state for later reuse
         pickle_path = Path(timestamped_out_dir) / "lmm_samples.pkl"
         with open(pickle_path, "wb") as f:
-            cloudpickle.dump(self.samples, f)
+            cloudpickle.dump(self, f)
 
         print(f"All episodes streamed to disk in '{timestamped_out_dir}'.")
         print(f"LMMM samples list of dicts saved to '{pickle_path}'.")

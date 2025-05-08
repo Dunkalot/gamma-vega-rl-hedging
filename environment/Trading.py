@@ -4,7 +4,6 @@ FLAGS = flags.FLAGS
 import numpy as np
 from enum import IntEnum
 import tensorflow as tf
-import numba
 
 class AssetInterface(ABC):
     """Asset Interface
@@ -41,9 +40,8 @@ class AssetInterface(ABC):
 class SwapKeys(IntEnum):
     PRICE = 0
     PNL = 1
-    ACTIVE = 2
-    DELTA = 3,
-    RATE = 4
+    DELTA = 2,
+    RATE = 3,
 class Swaps(AssetInterface):
     """Swap instrument book (hedge + liability legs), episode-aware."""
     def __init__(self, price_path_hed_iterable, price_path_liab_iterable, utils):
@@ -72,6 +70,7 @@ class Swaps(AssetInterface):
 
     def step_hed(self, t: int):
         pnl_hed  = np.sum(self.active_path_hed [t, :, SwapKeys.PNL]  * self.position_hed )
+        #print(f"{pnl_hed=}, {self.position_hed=}")
         return pnl_hed
     def step_liab(self, t: int):
         pnl_liab = np.sum(self.active_path_liab[t, :, SwapKeys.PNL] * self.position_liab )
@@ -122,7 +121,7 @@ class Greek(IntEnum):
     GAMMA = 2
     VEGA = 3
     PNL = 4
-    ACTIVE = 5
+    IV = 5
 
 
 class SwaptionPortfolio:
@@ -167,7 +166,9 @@ class SwaptionPortfolio:
         self._positions[t:, t] = num_contracts * self.utils.contract_size
 
         price = self._base_options[t, t, Greek.PRICE]
-        cost  = -abs(self.utils.spread * price * self._positions[t, t] )
+        DVVOL = self._base_options[t, t, Greek.VEGA] * self._base_options[t, t, Greek.IV]
+        #print(self._base_options[t, t, Greek.VEGA], self._base_options[t, t, Greek.IV],self._positions[t, t])
+        cost  = -abs(self.utils.spread * DVVOL * self._positions[t, t] )
         return cost
 
     def get_metric(self, t: int, greek: int,
@@ -274,7 +275,7 @@ class MainPortfolio(AssetInterface):
         self.utils = utils
         self.dt = self.utils.dt
         #self.a_price, self.vol = utils.init_env()
-        hedge_swaption, liab_swaption, hedge_swap, liab_swap, liab_swaption_position = utils.generate_swaption_market_data()
+        hedge_swaption, liab_swaption, hedge_swap, liab_swap, liab_swaption_position, self.kernel_hed_all, self.kernel_liab_all, self.ttm_mat = utils.generate_swaption_market_data()
         print("initializing classes")
         self.liab_port = SwaptionLiabilityPortfolio(utils, liab_swaption, liab_swaption_position)
         self.hed_port: SwaptionPortfolio = SwaptionPortfolio(utils, hedge_swaption) 
@@ -286,14 +287,21 @@ class MainPortfolio(AssetInterface):
         self.kernel_beta = np.float32(1.0) # standard deviation of the kernel
         self.use_rbf_kernel = False
         # idx for hed and liab
-        self.anchor_hed = tf.int32(52)
-        self.anchor_liab = tf.int32(self.anchor_hed * 2)
         
         self.gamma_vector = np.zeros(105, dtype=np.float32)
         self.vega_vector = np.zeros(105, dtype=np.float32)
         self.delta_vector = np.zeros(105, dtype=np.float32)
 
+    def kernel_coef_hed(self,t):
+        """regression weights wrt hedging asset"""
+        return self.kernel_hed[t]
+    
+    def kernel_coef_liab(self,t):
+        """regression weights wrt liability asset"""
+        return self.kernel_liab[t]
 
+    def get_ttm_vec(self,t):
+        return self.ttm_mat[t]
 
 
     def get_value(self, t):
@@ -327,21 +335,6 @@ class MainPortfolio(AssetInterface):
     # def get_delta_local_liab(self, t):
     #     """Compute the delta around the liability swaption expiry"""
     #     return self.compute_local_sensitivity(self.get_delta_vec(t), t+self.liab_offset_idx)
-    
-    def get_hed_liab_relative_sensitivity(self, t,scalar):
-        """Compute the delta sensitivity of the liability swaption to the hedging swaption delta"""
-        # delta_hedge_unit is the delta of the hedging swaption
-        # delta_liab_local is the local delta of the liability swaption
-        # delta_liab_hed_unit_sensitivity is the sensitivity of the liability swaption to the hedging swaption delta
-        delta_liab_local = self.get_kernel_sensitivity(t,t+ self.liab_offset_idx)
-        return delta_liab_local * scalar
-
-
-    def get_delta_local_spot (self, t):
-        """compute the delta at the spot time. NOTE: this assumes that the liability swaption is 1 year away from the hedging swaption, and that the hedging swaption
-        has 1 year to expiry."""
-        return self.compute_local_sensitivity(self.get_delta_vec(t), t-self.liab_offset_idx)
-
 
     def get_gamma(self, t):
         """portfolio gamma at time t"""
@@ -354,39 +347,27 @@ class MainPortfolio(AssetInterface):
     
     def get_gamma_local_hed(self, t):
         """portfolio gamma around the hedging swaption expiry"""
-        return self.compute_local_sensitivity(self.get_gamma_vec(t), t)
+        return np.inner(self.kernel_coef_hed(t)**2, self.get_gamma_vec(t))
 
+    def get_delta_local_hed(self, t):
+        """portfolio delta around the hedging swaption expiry"""
+        return np.inner(self.kernel_coef_hed(t), self.get_delta_vec(t))
 
-    def get_vega(self, t):
-        """portfolio vega at time t"""
-        return self.hed_port.get_vega(t) + self.liab_port.get_vega(t)
-    
-    def get_vega_vec(self, t):
+    def get_delta_local_liab(self, t):
+        """portfolio delta around the liability swaption expiry"""
+        return np.inner(self.kernel_coef_liab(t), self.get_delta_vec(t))
+
+    def get_vega(self,t):
+        """not implemented"""
+        pass
+
+    def get_vega_local_hed(self,t):
         """portfolio vega vector at time t"""
         swaption_vega = np.concatenate([self.hed_port.get_vega_vec(t), self.liab_port.get_vega_vec(t)])
         return swaption_vega
-    
-    def get_vega_local_hed(self, t):
-        """portfolio vega at time t"""
-        return self.compute_local_sensitivity(self.get_vega_vec(t), t)
-    
-    def update_kernel_delta_vector(self,t):
-        self.delta_vector[52-t:] = self.get_delta_vec(t)[:53+t]
-        return self.delta_vector
 
-    def update_kernel_gamma_vector(self,t):
-        self.gamma_vector[52-t:] = self.get_gamma_vec(t)[:53+t]
-        return self.gamma_vector
-    
-    def update_kernel_vega_vector(self,t):
-        self.vega_vector[52-t:] = self.get_vega_vec(t)[:53+t]
-        return self.vega_vector
 
-    def update_risk_vectors(self,t):
-        self.update_kernel_gamma_vector(t)
-        self.update_kernel_vega_vector(t)
-        self.update_kernel_delta_vector(t)
-        
+
 
     def reset(self, sim_episode: int):
         """Reset all components at the beginning of episode `sim_episode`."""
@@ -398,74 +379,80 @@ class MainPortfolio(AssetInterface):
 
         self.liab_port.reset()
         self.liab_port.set_episode_liab(sim_episode)
-        self.gamma_vector[:] = np.float32(0.)
-        self.delta_vector[:] = np.float32(0.)
-        self.vega_vector[:]  = np.float32(0.)
         # prime the delta vector
-        
-    def get_kernel_delta_hed(self):
-        return self.utils.vol_kernel(self.delta_vector)
+        self.kernel_hed = self.kernel_hed_all[sim_episode]
+        self.kernel_liab = self.kernel_liab_all[sim_episode]
+        np.set_printoptions(precision=10, suppress=True)
+        np.set_printoptions(threshold=np.inf, linewidth=np.inf)
+        #print(self.underlying.active_path_hed[...,SwapKeys.DELTA])
 
-    def get_kernel_delta_liab(self):
-        return self.utils.vol_kernel(self.delta_vector, anchor_index=104)
 
-    def get_kernel_gamma_hed(self):
-        return self.utils.vol_kernel(self.gamma_vector, gamma=True)
-    
-    def get_kernel_greek_risk(self):
-        vol_kernel = self.utils.vol_kernel
-        gamma_local, delta_local_hed = vol_kernel(np.concatenate([self.gamma_vector[None,:],self.delta_vector[None,:]]))
-        delta_local_liab = vol_kernel(self.delta_vector, anchor_index=104)
-        return gamma_local, delta_local_hed, delta_local_liab
     
     def get_state(self, t: int) -> np.ndarray:
         rate_hed   = self.underlying.get_rate_hed(t)
         #rate_liab  = self.underlying.get_rate_liab(t)  
-
         # scale sensitivities by the number of contracts that will be bought
         gamma_unit_hed  = self.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size
         vega_unit_hed = self.hed_port._base_options[t,t,Greek.VEGA] * self.utils.contract_size
-        #delta_unit_hed  = self.underlying.active_path_hed[t, t, SwapKeys.DELTA] * self.utils.contract_size
-        #delta_unit_liab = self.underlying.active_path_liab[t, t, SwapKeys.DELTA] * self.utils.contract_size
-        #delta_unit_hed_swaption = self.hed_port._base_options[t,t,Greek.DELTA] * self.utils.contract_size
-        self.update_risk_vectors(t)
-        gamma_port = self.get_kernel_gamma_hed()
-        
-        state = np.array([rate_hed,vega_unit_hed, gamma_unit_hed, gamma_port,
-                        t*self.dt], dtype=np.float32)
+        hed_cost = self.hed_port._base_options[t,t,Greek.PRICE] * self.utils.spread * self.utils.contract_size
+        gamma_port = self.get_gamma_local_hed(t)
+        ttm = self.get_ttm_vec(t)[0]
 
+        # transforms
+        log_rate       = np.log1p(rate_hed)
+        log_vega       = np.log1p(vega_unit_hed)
+        log_gamma_unit = np.log1p(gamma_unit_hed)
+        log_cost       = np.log1p(hed_cost)
+
+        sign_gp        = np.sign(gamma_port)
+        log_gamma_port = np.log1p(abs(gamma_port))
+
+        log_ttm        = np.log1p(ttm)
         
-        #state = np.concatenate([state, self.gamma_vector, self.vega_vector, self.delta_vector])
+        state = np.array([log_rate,log_cost, log_vega, log_gamma_unit, log_gamma_port, log_ttm, 
+                          sign_gp, gamma_port], dtype=np.float32)
         return state.astype(np.float32)
 
 
-    @numba.njit
-    @staticmethod
-    def solve_2x2_numba(a, b, c, d, e, f):
+    def get_kernel_greek_risk(self, t):
+        return self.get_gamma_local_hed(t), self.get_delta_local_hed(t), self.get_delta_local_liab(t)
+        
+
+    def solve_2x2_numba(self,a, b, c, d, e, f):
         det = a*d - b*c
         # optionally handle det == 0   
+        #print(a,b,c,d,e,f, det)
         return ( ( e*d - b*f ) / det,
                 ( a*f - e*c ) / det )
-    
-    def step(self, action_swaption_hed, t: int, result):
-        """Apply actions, compute PnL and reward at time t."""
+    def solve_delta_action(self, t):
         delta_unit_hed  = self.underlying.active_path_hed[t, t, SwapKeys.DELTA] * self.utils.contract_size
         delta_unit_liab = self.underlying.active_path_liab[t, t, SwapKeys.DELTA] * self.utils.contract_size
+        #print(delta_unit_hed, delta_unit_liab)
+        # Store results of expensive/repeated calls
+        k_coef_hed = self.kernel_coef_hed(t)
+        k_coef_liab = self.kernel_coef_liab(t)
+        current_delta_vec = self.get_delta_vec(t)
 
-        result.cost_swaption_hed = self.hed_port.add(t, action_swaption_hed)
-        self.update_kernel_delta_vector()
-        # swaption is added, we now know the full delta vector that needs to be neutralized
-        k12_raw = self.utils.vol_kernel.weight_single(self.anchor_hed, target_idx=self.anchor_liab)
-        k21_raw = self.utils.vol_kernel.weight_single(self.anchor_liab, target_idx=self.anchor_hed)
+        k12_raw = k_coef_hed[t+52]
+        k21_raw = k_coef_liab[t]
         
-        delta_local_hed = self.get_kernel_delta_hed()
-        delta_local_liab = self.get_kernel_delta_liab()
-        action_swap_hed_delta, action_swap_liab_delta = MainPortfolio.solve_2x2_numba(1.,k12_raw, k21_raw,1., delta_local_hed, delta_local_liab)
+        # Use stored results to compute local deltas
+        # This replaces implicit calls within self.get_delta_local_hed(t) and self.get_delta_local_liab(t)
+        delta_local_hed = np.inner(k_coef_hed, current_delta_vec)
+        delta_local_liab = np.inner(k_coef_liab, current_delta_vec)
+        action_swap_hed_delta, action_swap_liab_delta = self.solve_2x2_numba(1.,k12_raw, k21_raw,1., delta_local_hed, delta_local_liab)
 
-
-        action_swap_hed = action_swap_hed_delta / delta_unit_hed
-        action_swap_liab = action_swap_liab_delta / delta_unit_liab
-
+        action_swap_hed = -action_swap_hed_delta / delta_unit_hed
+        action_swap_liab = -action_swap_liab_delta / delta_unit_liab
+        
+        return action_swap_hed, action_swap_liab
+    def step(self, action_swaption_hed, t: int, result):
+        """Apply actions, compute PnL and reward at time t."""
+        
+        result.cost_swaption_hed = self.hed_port.add(t, action_swaption_hed)
+        
+        # swaption is added, we now know the full delta vector that needs to be neutralized
+        action_swap_hed, action_swap_liab = self.solve_delta_action(t)
         result.cost_swap_hed, result.cost_swap_liab = self.underlying.add(t, action_swap_hed, action_swap_liab)
        
         
@@ -476,7 +463,7 @@ class MainPortfolio(AssetInterface):
         result.step_pnl_hed_swap      = self.underlying.step_hed(t)
         result.step_pnl_liab_swap     = self.underlying.step_liab(t)
         
-
+        
         reward = (
             result.cost_swaption_hed +
             result.cost_swap_hed +
@@ -486,6 +473,6 @@ class MainPortfolio(AssetInterface):
             result.step_pnl_hed_swap +
             result.step_pnl_liab_swap
         )
-        
+        result.cost_ratio = np.abs(result.cost_swaption_hed)/np.abs(reward)
    
         return np.float32(reward)

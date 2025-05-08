@@ -25,12 +25,12 @@ class Utils:
         sim_time = 1,
         t_max=None,
         beta=0.5,
-        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42, swap_spread =0.0001):
+        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42, swap_spread =0.0001, test_episode_offset=50_000,test=False):
         
         self.seed = seed
 
-        self.out_dir = "data/swaption_memmap"
-        
+        self.out_dir = "data/calm"
+        self.test_episode_offset = test_episode_offset
         
         
         print(f"utils initiated with {spread=}, {poisson_rate=}, {n_episodes=}")
@@ -48,15 +48,16 @@ class Utils:
             swap_hedge_expiry=swap_hedge_expiry,
             swap_client_expiry=swap_client_expiry
         )
-        self.contract_size = np.float32(100)
+        self.contract_size = np.float32(1000)
         print("!!!! CONTRACT SIZE IS ", self.contract_size)
+        print(f"\nXXXXXXXXXXXXXXXXXXXXXX\n The spread is {spread}   \n nXXXXXXXXXXXXXXXXXXXXXX")
         self.swap_spread = np.float32(0) # TODO: set it to something other than 0
         self.spread = np.float32(spread)
         self.poisson_rate = poisson_rate
         self.n_episodes = n_episodes
         self.swap_shape = self.lmm.swap_sim_shape
         self.hed_greeks = 6
-        self.swap_dims = 5
+        self.swap_dims = 4
         self.dt = np.float32(self.lmm.dt)
 
         self.num_period = self.lmm.swap_sim_shape[0] # number of steps
@@ -94,7 +95,7 @@ class Utils:
         # If out_dir has subdirectories, pick latest timestamp
         candidates = sorted(glob.glob(os.path.join(out_dir, '*')))
         data_dir = candidates[-1] if os.path.isdir(candidates[-1]) else out_dir
-
+        print("Using ", data_dir, "dataset")
         T1, T2 = swap_shape[0], swap_shape[0] # hedge and liability are split into two square matrices
         # Load memmaps with known shapes and dtype float32
         hedge_swaption_mm = np.memmap(
@@ -125,13 +126,19 @@ class Utils:
         cov_hed = np.memmap(
             os.path.join(data_dir, 'cov_hed.dat'),
             dtype=np.float32, mode='r',
-            shape=(n_episodes, T1, T2)
+            shape=(n_episodes, T1, T2*2)
         )
         cov_liab = np.memmap(
             os.path.join(data_dir, 'cov_liab.dat'),
             dtype=np.float32, mode='r',
-            shape=(n_episodes, T1, T2)
+            shape=(n_episodes, T1, T2*2)
         )
+
+        # make ttm_mat 
+        ttm_mat = self.lmm.ttm_mat[np.ix_(self.lmm.swap_idxs[0],self.lmm.swap_idxs[1])].copy()
+        ttm_mat[np.triu_indices_from(ttm_mat,k=53)] = 0
+
+
         return (
             hedge_swaption_mm,
             liab_swaption_mm,
@@ -139,6 +146,7 @@ class Utils:
             liab_swap_mm,
             net_direction_mm,
             cov_hed,
-            cov_liab
+            cov_liab,
+            ttm_mat
         )
         

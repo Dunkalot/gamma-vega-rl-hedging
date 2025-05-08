@@ -57,6 +57,7 @@ class D4PGLearner(acme.Learner):
         target_observation_network: types.TensorTransformation = lambda x: x,
         policy_optimizer: Optional[snt.Optimizer] = None,
         critic_optimizer: Optional[snt.Optimizer] = None,
+        annealer_steps: int =None,
         clipping: bool = True,
         counter: Optional[counting.Counter] = None,
         logger: Optional[loggers.Logger] = None,
@@ -128,6 +129,14 @@ class D4PGLearner(acme.Learner):
         # Create optimizers if they aren't given.
         self._critic_optimizer = critic_optimizer or snt.optimizers.Adam(1e-4)
         self._policy_optimizer = policy_optimizer or snt.optimizers.Adam(1e-4)
+        # in D4PGLearner.__init__ (after reading initial_a, decay_steps, end_a, power)
+        self._anneal_schedule = tf.keras.optimizers.schedules.PolynomialDecay(
+            initial_learning_rate=5.0,
+            decay_steps=annealer_steps,
+            end_learning_rate=0.01,
+            power=1.0
+        )
+
 
         # Expose the variables.
         policy_network_to_expose = snt.Sequential(
@@ -190,7 +199,7 @@ class D4PGLearner(acme.Learner):
             for src, dest in zip(online_variables, target_variables):
                 dest.assign(src)
         self._num_steps.assign_add(1)
-
+        
         # Get data from replay (dropping extras if any). Note there is no
         # extra data here because we do not insert any into Reverb.
         sample = next(self._iterator)
@@ -198,7 +207,10 @@ class D4PGLearner(acme.Learner):
 
         # Cast the additional discount to match the environment discount dtype.
         discount = tf.cast(self._discount, dtype=transitions.discount.dtype)
-
+        a = tf.cast(self._anneal_schedule(self._num_steps), dtype=tf.float32)
+        self._policy_network.set_temperature(a)
+        self._target_policy_network.set_temperature(a)
+        #tf.print("updating a",a,self._num_steps)
         with tf.GradientTape(persistent=True) as tape:
             # Maybe transform the observation before feeding into policy and critic.
             # Transforming the observations this way at the start of the learning
@@ -212,6 +224,8 @@ class D4PGLearner(acme.Learner):
             # evaluated at o_t, this also means the policy loss does not influence
             # the observation network training.
             o_t = tree.map_structure(tf.stop_gradient, o_t)
+            
+            
 
             # Critic learning.
             q_tm1 = self._critic_network(o_tm1, transitions.action)

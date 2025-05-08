@@ -11,7 +11,9 @@ import copy
 from acme.utils import loggers
 import logging
 import numpy as np
-
+import cProfile
+import pstats
+import io # For capturing output
 from environment.Trading import MainPortfolio, Greek, SwapKeys
 
 import tensorflow as tf
@@ -21,15 +23,15 @@ class StepResult:
     episode: int = 0
     t: int = 0
     action_swaption: float = 0.0
-    action_swap_hed: float = 0.0
-    action_swap_liab: float = 0.0
-    action_swap_hed_mag: float = 0.0
-    action_swap_liab_mag: float = 0.0
+    #action_swap_hed: float = 0.0
+    #action_swap_liab: float = 0.0
+    #action_swap_hed_mag: float = 0.0
+    #action_swap_liab_mag: float = 0.0
 
     cost_swaption_hed: float = 0.0
     cost_swap_hed: float = 0.0
     cost_swap_liab: float = 0.0
-
+    cost_ratio: float = 0.0
     step_pnl: float = 0.0
     step_pnl_hed_swaption: float = 0.0
     step_pnl_liab_swaption: float = 0.0
@@ -45,33 +47,32 @@ class StepResult:
 
     gamma_before: float = 0.0
     gamma_after: float = 0.0
-    vega_before: float = 0.0
-    vega_after: float = 0.0
+    #vega_before: float = 0.0
+    #vega_after: float = 0.0
 
     action_gamma: float = 0.0
-    action_vega: float = 0.0
+    #action_vega: float = 0.0
     gamma_ratio: float = 0.0
-    vega_ratio: float = 0.0
+    #vega_ratio: float = 0.0
 
 
 class TrainLog:
     @staticmethod
-    def _log_before(self,result):
+    def _log_before(self,result,t):
         pass
     @staticmethod
-    def _log_after(self,result):
+    def _log_after(self,result,t):
         pass
 class EvalLog:
     @staticmethod
-    def _log_before(self, result):
+    def _log_before(self, result,t):
         
-            result.gamma_before, result.vega_before, result.delta_local_hed_before, result.delta_local_liab_before = self.portfolio.get_kernel_greek_risk()
+            result.gamma_before,  result.delta_local_hed_before, result.delta_local_liab_before = self.portfolio.get_kernel_greek_risk(t)
             result.delta_before = self.portfolio.get_delta(self.t)
     @staticmethod
-    def _log_after(self, result):
+    def _log_after(self, result,t):
 
-        self.portfolio.update_risk_vectors(self.t) # risk change following action
-        result.gamma_after, result.vega_after, result.delta_local_hed_after, result.delta_local_liab_after = self.portfolio.get_kernel_greek_risk()
+        result.gamma_after, result.delta_local_hed_after, result.delta_local_liab_after = self.portfolio.get_kernel_greek_risk(t)
         result.delta_after = self.portfolio.get_delta(self.t) # portfolio delta
         self.logger.write(dataclasses.asdict(result))
 
@@ -81,7 +82,7 @@ class TradingEnv(gym.Env):
     """
 
     # trade_freq in unit of day, e.g 2: every 2 day; 0.5 twice a day;
-    def __init__(self, utils, log_bef=None, log_af=None, logger: Optional[loggers.Logger] = None):
+    def __init__(self, utils, log_bef=None, log_af=None, logger: Optional[loggers.Logger] = None,test=False):
 
         super(TradingEnv, self).__init__()
         self.log_bef = log_bef
@@ -100,12 +101,12 @@ class TradingEnv(gym.Env):
         self.num_path   = len(hedge_mm)
         # number of steps per episode inferred from memmap shape
         self.num_period = hedge_mm.shape[1]
-        self.sim_episode = -1
+        self.sim_episode = -1 + (utils.test_episode_offset if test else 0)
         self.t = None
         self.action_space = spaces.Box(
             low=-np.inf,    
             high=+np.inf,
-            shape=(1),
+            shape=(1,),
             dtype=np.float32
         )
         # obs space bounds
@@ -113,7 +114,7 @@ class TradingEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf,    
             high=+np.inf,
-            shape=(323,),
+            shape=(8,),
             dtype=np.float32
         )
 
@@ -136,38 +137,37 @@ class TradingEnv(gym.Env):
         profit and loss period reward
         """
         t = self.t
+        action = action[0]
         result = StepResult( episode=self.sim_episode, t=t)
 
-        result.action_gamma, result.action_vega, result.gamma_ratio ,result.vega_ratio,result.action_swaption, result.action_swap_hed, result.action_swap_liab = action
+        result.action_gamma = action
+        # gamma to notional
+        result.action_swaption = action/(
+            self.portfolio.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size)
         assert not np.isnan(action).any(), action
         #if self.print_nanwarning and np.isnan(action).any():
         #    self.print_nanwarning = False
         #    print(f"action is NaN! This warning is turned off until next episode")
         
         #if self.logger: # dont waste resources
-
-        self.log_bef(self,result) 
+        self.log_bef(self,result,t) 
         result.step_pnl = reward = self.portfolio.step(
             action_swaption_hed=result.action_swaption,
-            action_swap_hed=result.action_swap_hed,
-            action_swap_liab=result.action_swap_liab,
             t=self.t,
             result=result,
         )
 
-        self.log_af(self,result)
+        self.log_af(self,result,t)
             
         self.t = self.t + 1
 
         state = self.portfolio.get_state(self.t)
-        if self.t == self.num_period - 1:
+        if self.t == self.num_period-1:
             done = True
-            state[7:] = 0 # all greeks to 0
-            state[:4] = 0
+            state[[2,3,4,7]] = 0 # all greeks to 0
         else:
             done = False
         
 
         info = {"path_row": self.sim_episode}
-            
         return state, reward, done, info

@@ -236,39 +236,29 @@ class ObservationWithKernel(snt.Module):
 
 
 class PolicyWithHedge(snt.Module):
-    def __init__(self,  base_policy: snt.Module, name=None):
+    def __init__(self,
+                 base_policy: snt.Module,
+                 name=None):
         super().__init__(name=name)
         self.base_pol = base_policy
-        self.anchor_hed = 52
-        self.anchor_liab = self.anchor_hed * 2
-    
-
-    
+        self._a = tf.Variable(5.0, trainable=False, dtype=tf.float32)
+    def set_temperature(self, new_a: float):
+        # call this once per learner step
+        self._a.assign(new_a)
     @tf.function(jit_compile=True)
     def __call__(self, obs):
-        # 2) Unpack first 8 features
-        gamma_bound = obs[:, 0]
+        # unpack features
+        gamma_port      = tf.expand_dims(obs[..., -1], -1)
+        gamma_port_sign = tf.expand_dims(obs[..., -2], -1)
+        threshold       = self.base_pol(obs[..., :-1])
+        #threshold = tf.math.softplus(threshold)
+        # temperature‐scaled softplus
+        term = tf.abs(gamma_port) - threshold
+        a = self._a
+        action_gamma = -gamma_port_sign * tf.math.softplus(term / a) * a
+        #tf.print(threshold, term, action_gamma,a)
+        return action_gamma
 
-        
-
-
-        # forward pass through network
-        actions = self.base_pol(obs) 
-        
-        # network determines action 
-        action_gamma = actions[..., 0]
-
-        
-        # 4) Compute the final hedge
-        notional_swaption = -1*(action_gamma * gamma_bound) 
-
-
-
-        # 5) Stack everything on the last axis
-        action = tf.stack([
-        -action_gamma
-        ], axis=-1)
-        return action
 
 
 @dataclasses.dataclass
@@ -283,6 +273,7 @@ class D4PGConfig:
     target_update_period: int = 100
     policy_optimizer: Optional[snt.Optimizer] = None
     critic_optimizer: Optional[snt.Optimizer] = None
+    annealer_steps: int = None
     min_replay_size: int = 1000
     max_replay_size: int = 1000000
     samples_per_insert: Optional[float] = 32.0
@@ -471,6 +462,7 @@ class D4PGBuilder:
             target_observation_network=target_networks.observation_network,
             policy_optimizer=self._config.policy_optimizer,
             critic_optimizer=self._config.critic_optimizer,
+            annealer_steps = self._config.annealer_steps,
             clipping=self._config.clipping,
             discount=self._config.discount,
             target_update_period=self._config.target_update_period,
@@ -505,6 +497,7 @@ class D4PG(agent.Agent):
         target_update_period: int = 100,
         policy_optimizer: Optional[snt.Optimizer] = None,
         critic_optimizer: Optional[snt.Optimizer] = None,
+        annealer_steps=300_000,
         min_replay_size: int = 1000,
         max_replay_size: int = 1000000,
         samples_per_insert: float = 32.0,
@@ -560,6 +553,7 @@ class D4PG(agent.Agent):
                 target_update_period=target_update_period,
                 policy_optimizer=policy_optimizer,
                 critic_optimizer=critic_optimizer,
+                annealer_steps=annealer_steps,
                 min_replay_size=1,  # Let the Agent class handle this.
                 max_replay_size=max_replay_size,
                 samples_per_insert=None,  # Let the Agent class handle this.
@@ -668,28 +662,28 @@ class GammaHedgeAgent(core.Actor):
     def select_action(self, observation: types.NestedArray) -> types.NestedArray:
         episode = self.env.sim_episode
         t = self.env.t
-        current_gamma = observation[1]
+        current_gamma = observation[-1]
         
         hedge_gamma = self.hedge_ratio*current_gamma
-        hedge_option = self.env.portfolio.hed_port.options[episode,t]
-        hed_share = -hedge_gamma/hedge_option.gamma_path[t]/self.env.portfolio.utils.contract_size
+        #hedge_option = self.env.portfolio.hed_port.options[episode,t]
+        #hed_share = -hedge_gamma#/hedge_option.gamma_path[t]/self.env.portfolio.utils.contract_size
         # action constraints
-        gamma_action_bound = -self.env.portfolio.get_gamma(t)/self.env.portfolio.hed_port.options[episode, t].gamma_path[t]/self.env.portfolio.utils.contract_size
-        action_low = [0, gamma_action_bound]
-        action_high = [0, gamma_action_bound]
+        #gamma_action_bound = -self.env.portfolio.get_gamma(t)/self.env.portfolio.hed_port.options[episode, t].gamma_path[t]/self.env.portfolio.utils.contract_size
+        #action_low = [0, gamma_action_bound]
+        #action_high = [0, gamma_action_bound]
         
-        if FLAGS.vega_obs:
-            # vega bounds
-            vega_action_bound = -self.env.portfolio.get_vega(t)/self.env.portfolio.hed_port.options[episode, t].vega_path[t]/self.env.portfolio.utils.contract_size
-            action_low.append(vega_action_bound)
-            action_high.append(vega_action_bound)
+        #if FLAGS.vega_obs:
+        #    # vega bounds
+        #    vega_action_bound = -self.env.portfolio.get_vega(t)/self.env.portfolio.hed_port.options[episode, t].vega_path[t]/self.env.portfolio.utils.contract_size
+        #    action_low.append(vega_action_bound)
+        #    action_high.append(vega_action_bound)
 
-        low_val = np.min(action_low)
-        high_val = np.max(action_high)
+        #low_val = np.min(action_low)
+        #high_val = np.max(action_high)
 
-        alpha = (hed_share - low_val)/(high_val - low_val)
+        #alpha = (hed_share - low_val)/(high_val - low_val)
         
-        return np.array([alpha])
+        return np.array([-hedge_gamma])
 
     def observe_first(self, timestep: dm_env.TimeStep):
         pass
