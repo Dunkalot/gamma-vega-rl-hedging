@@ -225,9 +225,9 @@ def make_networks(
 def make_quantile_networks(
     action_spec: specs.BoundedArray,
     #policy_layer_sizes: Sequence[int] = (256, 256, 256), # (64, 64)
-    policy_layer_sizes: Sequence[int] = (64, 64),
+    policy_layer_sizes: Sequence[int] = (64, 64, 64),
     #critic_layer_sizes: Sequence[int] =  (512, 512, 256),
-    critic_layer_sizes: Sequence[int] =  (64, 64),
+    critic_layer_sizes: Sequence[int] =  (64, 64, 64),
     quantile_interval: float = 0.01, 
     ) -> Mapping[str, types.TensorTransformation]:
     """Creates the networks used by the agent."""
@@ -250,16 +250,16 @@ def make_quantile_networks(
     internal_action_spec = specs.BoundedArray(
         shape=(1,),   # e.g. [a_mag, a_dir]
         dtype=np.float32,
-        minimum=-np.inf,
-        maximum=np.inf,
+        minimum=0.0,
+        maximum=1.0,
         name="internal_action",
         )
     internal_action_dim = 1
     
     base_policy = snt.Sequential([
         networks.LayerNormMLP(policy_layer_sizes, activate_final=True),
-        networks.NearZeroInitializedLinear(internal_action_dim)#,
-        #networks.TanhToSpec(internal_action_spec),
+        networks.NearZeroInitializedLinear(internal_action_dim),
+        networks.TanhToSpec(internal_action_spec),
     ])
     
     policy_network = PolicyWithHedge( base_policy=base_policy)
@@ -403,13 +403,13 @@ def main(argv):
         critic_network=agent_networks['critic'],
         observation_network=agent_networks['observation'],
         n_step=FLAGS.n_step,
-        discount=1.0,
+        discount=0.99,
         sigma=0.3,  # pytype: disable=wrong-arg-types
         checkpoint=False,
         logger=loggers['learner'],
         batch_size=FLAGS.batch_size,
-        policy_optimizer=snt.optimizers.Adam(3e-5),
-        critic_optimizer=snt.optimizers.Adam(3e-5),
+        policy_optimizer=snt.optimizers.Adam(1e-4),
+        critic_optimizer=snt.optimizers.Adam(1e-4),
         annealer_steps = 200000*6
     )
     #utils.vol_kernel = agent._learner._observation_network.vol_kernel

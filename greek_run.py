@@ -59,14 +59,13 @@ def make_logger(work_folder, label, terminal=False):
 #     environment = wrappers.SinglePrecisionWrapper(environment)
 
 #     return environment
-def make_environment(utils,log_bef=None, log_af=None, logger = None, test=False) -> dm_env.Environment:
+def make_environment(utils,log_bef=None, log_af=None, logger = None) -> dm_env.Environment:
     # Make sure the environment obeys the dm_env.Environment interface.
     environment = wrappers.GymWrapper(TradingEnv(
     utils=utils,
     log_bef=log_bef,
     log_af=log_af,
-    logger=logger,
-    test=test))
+    logger=logger))
     # Clip the action returned by the agent to the environment spec.
     #environment = wrappers.CanonicalSpecWrapper(environment, clip=False) # no need for scaling output
     environment = wrappers.SinglePrecisionWrapper(environment)
@@ -77,7 +76,7 @@ def make_environment(utils,log_bef=None, log_af=None, logger = None, test=False)
 def main(argv):
     gamma_hedge_ratio = 1.0
     
-    work_folder = f'greekhedge_spread={FLAGS.spread}'
+    work_folder = f'greekhedge_spread={FLAGS.spread}/minimal/{FLAGS.strategy}'
     if FLAGS.logger_prefix:
         work_folder = FLAGS.logger_prefix + "/" + work_folder
     # Create an environment, grab the spec, and use it to create networks.
@@ -88,8 +87,8 @@ def main(argv):
     eva_logfunc = EvalLog()
     eval_log_bef = eva_logfunc._log_before
     eval_log_af = eva_logfunc._log_after
-    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread)
-    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'),test=True)
+    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread, test_episode_offset=0, test=True)
+    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))
     # Create the evaluation actor and loop.
 
     if FLAGS.strategy == 'gamma':
@@ -97,13 +96,13 @@ def main(argv):
         #eval_env = make_environment(utils=eval_utils, logger=make_logger(work_folder, f'eval_gamma_env'))
         eval_actor = GammaHedgeAgent(eval_env, gamma_hedge_ratio)
         eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=make_logger(work_folder, f'eval_gamma_loop',True))
-        eval_loop.run(num_episodes=10)
+        eval_loop.run(num_episodes=1000)
     elif FLAGS.strategy == 'delta':
         # delta hedging
         #eval_env = make_environment(utils=eval_utils, logger=make_logger(work_folder, 'eval_delta_env'))
         eval_actor = DeltaHedgeAgent(eval_env, gamma_hedge_ratio)
         eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=make_logger(work_folder, 'eval_delta_loop', True))
-        eval_loop.run(num_episodes=5_000)
+        eval_loop.run(num_episodes=1000)
     elif FLAGS.strategy == 'vega':
         # vega hedging
         #eval_env = make_environment(utils=eval_utils, logger=make_logger(work_folder, 'eval_vega_env'))

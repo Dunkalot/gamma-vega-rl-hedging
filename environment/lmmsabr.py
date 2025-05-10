@@ -15,7 +15,7 @@ from scipy import interpolate
 from functools import partial
 from scipy.stats import norm
 import ipympl
-from mpl_toolkits.mplot3d import Axes3D
+#from mpl_toolkits.mplot3d import Axes3D
 from scipy.integrate import cumulative_trapezoid
 import time
 import cv2
@@ -24,6 +24,7 @@ from tqdm import tqdm
 from numba import njit, prange
 import psutil
 import os
+from types import SimpleNamespace
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 import pickle
@@ -73,7 +74,7 @@ def _simulate_core(f_sim, k_mat, g_mat, h_mat, phi_mat, rho_mat,
 
 
 
-def make_nss_yield_df(start_date='1986-12-01', end_date='2025-03-01', max_maturity=120):
+def make_nss_yield_df(start_date='1986-12-01', end_date='2025-03-01', max_maturity=180):
     df = pd.read_csv('../feds200628.csv', skiprows=9)
     df = df[['Date', 'BETA0', 'BETA1', 'BETA2', 'BETA3', 'TAU1', 'TAU2']]
     df['Date'] = pd.to_datetime(df['Date'])#.dt.date
@@ -540,6 +541,9 @@ def create_df_init(df_fwd, df_raw_spot, resolution, tau=0.5):
     return df
 
 
+#def interp_zcb_hed_liab(self, hed_idx, liab_idx):
+
+
 def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolated=None, g_func=None, interp_vol = False, zcb_interp = False):
     df = df_init
     #fwd = df['Forward'].values # only used for test, not to be uncommented
@@ -555,7 +559,7 @@ def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolat
     theta = (df['mod_accrual'].values)
     gamma = (df['gamma'].values)
     gamma_theta = gamma * theta
-
+    self.gamma_theta = gamma_theta
     #print(f"{len(i_s)}, {len(i_e)}")
         
 
@@ -572,7 +576,7 @@ def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolat
     if zcb_interp:
 
 
-        def build_forward_zcb_matrix_from_f_sim(f_sim_input, max_tenor=10):
+        def build_forward_zcb_matrix_from_f_sim(f_sim_input, max_tenor=12):
             """
             Compute a forward zero-coupon bond (ZCB) matrix P[t,e](t) in a fully vectorized manner,
             but only for maturities up to max_tenor (in years) beyond the current time.
@@ -985,7 +989,8 @@ def sample_doust_corr_matrix_batch(
     gamma = np.random.uniform(*gamma_range, size=n_samples)
 
     # 2) build the k = 1..n-1 index vector and its 1/k^γ values for each sample
-    k = np.arange(1, n)                               # shape (n-1,)
+    k = np.arange(1, n)                           # shape (n-1,)
+    #k = T[1:]
     inv_pow = k[None, :]**(-gamma[:, None])           # (n_samples, n-1)
 
     # 3) prefix‐sum over k to get c_m = sum_{r=1..m-1} 1/r^γ
@@ -1159,8 +1164,8 @@ class LMMSABR:
         n_samples=1,
         n_curves=None,
         random_curves = False,
-        rho_kwargs={'beta_range':(0.2020,0.2020), 'gamma_range':(1.5456,1.5456)},
-        theta_kwargs={'beta_range':( 0.0465, 0.0465), 'gamma_range':( 0.4417, 0.4417)},
+        rho_kwargs={'eta_range':(0.2020,0.2020), 'lambda_range':(1.5456,1.5456)},
+        theta_kwargs={'eta_range':( 0.0465, 0.0465), 'lambda_range':( 0.4417, 0.4417)},
         phi_kwargs={'lambda3_range': (0.0087931,0.0087931), 'lambda4_range': (0.051319,0.051319)},
         g_kwargs={'params':(-0.013,0.0287,0.5272,0.0268)},
         h_kwargs={'params':(0.5727,0.0002,2.3035,0.2757)},
@@ -1190,8 +1195,8 @@ class LMMSABR:
         fwd_kwargs = fwd_kwargs or {}
         
         self.df_fwd = df_fwd
-        rho_batch, rho_meta = sample_doust_corr_matrix_batch(T, n_samples, **rho_kwargs)
-        theta_batch, theta_meta = sample_doust_corr_matrix_batch(T, n_samples, **theta_kwargs)
+        rho_batch, rho_meta = sample_exponential_corr_matrix_batch(T, n_samples, **rho_kwargs)
+        theta_batch, theta_meta = sample_exponential_corr_matrix_batch(T, n_samples, **theta_kwargs)
         phi_batch, phi_meta = sample_phi_matrix_batch(T, n_samples, **phi_kwargs)
         g_params, _ = sample_positive_rebonato_params(n_samples=n_samples, seed=seed, **g_kwargs)
         h_params, _ = sample_positive_rebonato_params(n_samples=n_samples, volvol=True, seed=seed, **h_kwargs)
@@ -1269,7 +1274,7 @@ class LMMSABR:
 
         sample = self.samples[sample_idx]
         self._primed_sample = sample  # Optional: stash for later reference
-
+        print("sampling")
         # Assign to model state — depends on how your class expects these
         self.rho_mat = sample["rho_mat"]
         self.theta_mat = sample["theta_mat"]
@@ -1279,11 +1284,11 @@ class LMMSABR:
         self.df_init = sample["df_init"]
         self.g = partial(get_instant_vol_func, params=self.g_params)
         self.h = partial(get_instant_vol_func, params=self.h_params)
-        self.interpolate_corr_matrices()
+        #self.interpolate_corr_matrices()
         self.prepare_curves()
-        self.rho_tensor = self.build_swap_correlation_tensor(self.rho_mat_interp)
-        self.theta_tensor = self.build_swap_correlation_tensor(self.theta_mat_0m_interpolated)
-        self.phi_tensor = self.build_swap_correlation_tensor(self.phi_mat_0m_interpolated)
+        self.rho_tensor = self.build_swap_correlation_tensor(self.rho_mat)
+        self.theta_tensor = self.build_swap_correlation_tensor(self.theta_mat)
+        self.phi_tensor = self.build_swap_correlation_tensor(self.phi_mat)
         self.G_tensor = self.precompute_G_tensor()
         self.ggh_tensor = self.build_V_tensor_from_scalar(tenor=self.tenor, resolution=self.resolution, tau=self.tau)[np.ix_(self.swap_idxs[0], self.swap_idxs[1])]
         self.primed = True
@@ -1464,7 +1469,6 @@ class LMMSABR:
         G_tensor = np.zeros((n_swap_t, num_t, n, n))*np.nan
         # set the diagonal of the n,m,k,l tensor to 0
         G_tensor[np.diag_indices(n_swap_t)] = 0
-
         cache = {}  # (delta_T_idx, delta_i, delta_j) → float
         max_expiry_idx = int(max_expiry * resolution / tau)  # max expiry in steps
         for t_idx in range(n_swap_t):
@@ -1525,7 +1529,7 @@ class LMMSABR:
             self.df_init,
             resolution=self.resolution,
             tau=self.tau,
-            rho_mat_interpolated=self.rho_mat_interp,
+            rho_mat_interpolated=self.rho_mat,
             g_func=self.g,
             interp_vol=True,
             zcb_interp=True,beta=1
@@ -1540,6 +1544,7 @@ class LMMSABR:
 
 
     def interpolate_corr_matrices(self):
+        print("interpolating. the corr matrices are currently", self.rho_mat.shape)
         self.rho_mat_interp = interpolate_correlation_matrix_cv(self.rho_mat, self.resolution)
         self.theta_mat_0m_interpolated = interpolate_correlation_matrix_cv(self.theta_mat, self.resolution)
         self.phi_mat_0m_interpolated = interpolate_correlation_matrix_cv(self.phi_mat, self.resolution)
@@ -1659,7 +1664,6 @@ class LMMSABR:
         annuity_t     = w_t.sum(axis=2, keepdims=True)
         w_t          /= annuity_t              # (t_valid, n_swaps, n_payments)
 
-
         #  swap rate
         swap_paths    = (w_t * fwd_subsets).sum(axis=2)
         swap_paths[np.triu_indices_from(swap_paths, k= self.t_to_idx(self.max_swap_expiry-self.min_swap_expiry)+1)] = np.nan
@@ -1773,6 +1777,7 @@ class LMMSABR:
             #print("sigmas")
             #print(np.max(np.nan_to_num(sigma_ofs)), np.min(np.nan_to_num(sigma_ofs)))
             iv = self.sabr_implied_vol(F=swap_sim_ofs, K=atm_strikes, T=ttm_mat_ofs, alpha=sigma_ofs, beta=self.beta, rho=phi_ofs, nu=V_ofs)
+            self.iv = iv
             price, delta, gamma, vega = self.black_swaption_price(F=swap_sim_ofs, K=atm_strikes, T=ttm_mat_ofs, sigma=iv, annuity=annuity_ofs)
             active = ~np.isnan(price)
                     # Initialize with zeros (or nan if you prefer to explicitly mask unused rows)
@@ -1805,7 +1810,35 @@ class LMMSABR:
         liab_metrics = risk_metrics(swap_liab_expiry_relative_idx)
 
         return hedge_metrics, liab_metrics
+    def sabr_structured_data(self):
+        hedge_metrics_tuple, liab_metrics_tuple = self.get_sabr_params()
+        # metrics_tuple is (swaption_stack, swap_stack)
 
+        def _convert_metrics_to_structured_data(metrics_tuple):
+            swaption_stack, swap_stack = metrics_tuple
+            # Swaption data: price, delta, gamma, vega, pnl, iv
+            swaption = SimpleNamespace(
+                price=swaption_stack[..., 0],
+                delta=swaption_stack[..., 1],
+                gamma=swaption_stack[..., 2],
+                vega=swaption_stack[..., 3],
+                pnl=swaption_stack[..., 4],
+                iv=swaption_stack[..., 5]
+            )
+            
+            # Swap data: value, pnl, annuity, rate
+            swap = SimpleNamespace(
+                value=swap_stack[..., 0],
+                pnl=swap_stack[..., 1],
+                annuity=swap_stack[..., 2],
+                rate=swap_stack[..., 3]  # Corresponds to original swap_sim_ofs
+            )
+            return SimpleNamespace(swaption=swaption, swap=swap)
+
+        hedge_data_structured = _convert_metrics_to_structured_data(hedge_metrics_tuple)
+        liab_data_structured = _convert_metrics_to_structured_data(liab_metrics_tuple)
+
+        return SimpleNamespace(hedge=hedge_data_structured, liability=liab_data_structured)
 
     def sabr_implied_vol(self,
         F, K, T, alpha, beta: float, rho, nu, atol=1e-12
@@ -1911,7 +1944,7 @@ class LMMSABR:
         ax = fig.add_subplot(111, projection='3d')
         # Create mesh grid the shape of self.swap_sim
         X = np.arange(mat.shape[0])*self.dt
-        Y = np.arange(mat.shape[1])
+        Y = np.arange(mat.shape[1])*self.dt
         X, Y = np.meshgrid(X, Y)
         Z = mat.T
         # Create surface plot
@@ -1923,6 +1956,9 @@ class LMMSABR:
         fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5)
         # angle so we look down from above
         ax.view_init(elev=45, azim=210)
+        plt.show()
+
+        plt.close(fig)  # Prevents traces in later plots
     
 
     def compute_regression_betas(self, offset=0):
@@ -1979,10 +2015,13 @@ class LMMSABR:
         ensuring all data is saved as float32, with a tqdm progress bar and
         a final pickle of the model.
         """
+        if self.dt < 1/100:
+            print("USING ONLY 1 SUBSTEP AS dt < 1/100")
+            sub_step = 1 # no sub steps since we already have a fine resolution for the euler step
         # prepare output directory
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         assert self.primed, "You must call prime() before generating episodes."
-        assert len(self.df_init_list) > 10, "you need a diverse set of starting curves"
+        #assert len(self.df_init_list) > 10, "you need a diverse set of starting curves"
         # 1) sample one episode to get per-episode shapes
         self.simulate(seed=0)
         self.get_swap_matrix()
@@ -1997,7 +2036,7 @@ class LMMSABR:
         # 2) create timestamped subdirectory
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         base_dir = f"{out_dir}/{timestamp}"
-        timestamped_out_dir = f"{base_dir}_{self.tenor}y"
+        timestamped_out_dir = f"{base_dir}_{self.tenor}y_{n_episodes}"
         Path(timestamped_out_dir).mkdir(parents=True, exist_ok=True)
 
         # 3) pre-allocate memmap files with float32 dtype
@@ -2040,7 +2079,7 @@ class LMMSABR:
             # fill buffers
             for i in range(b):
                 ep_idx = start + i
-                self.simulate(seed=ep_idx)
+                self.simulate(seed=ep_idx, sub_steps = sub_step)
                 self.get_swap_matrix()
                 (h_sh, h_sw), (l_sh, l_sw) = self.get_sabr_params()
                 self.compute_regression_betas()

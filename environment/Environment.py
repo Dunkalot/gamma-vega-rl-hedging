@@ -82,8 +82,8 @@ class TradingEnv(gym.Env):
     """
 
     # trade_freq in unit of day, e.g 2: every 2 day; 0.5 twice a day;
-    def __init__(self, utils, log_bef=None, log_af=None, logger: Optional[loggers.Logger] = None,test=False):
-
+    def __init__(self, utils, log_bef=None, log_af=None, logger: Optional[loggers.Logger] = None):
+        self.actions = np.zeros(utils.swap_shape[0])#*np.nan
         super(TradingEnv, self).__init__()
         self.log_bef = log_bef
         self.log_af = log_af 
@@ -101,11 +101,12 @@ class TradingEnv(gym.Env):
         self.num_path   = len(hedge_mm)
         # number of steps per episode inferred from memmap shape
         self.num_period = hedge_mm.shape[1]
-        self.sim_episode = -1 + (utils.test_episode_offset if test else 0)
+        self.sim_episode = -1 + (utils.test_episode_offset if utils.test else 0)
+        print(f"episode offset {self.sim_episode}")
         self.t = None
         self.action_space = spaces.Box(
-            low=-np.inf,    
-            high=+np.inf,
+            low=0.0,    
+            high=1.0,
             shape=(1,),
             dtype=np.float32
         )
@@ -114,7 +115,7 @@ class TradingEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf,    
             high=+np.inf,
-            shape=(8,),
+            shape=(6,),
             dtype=np.float32
         )
 
@@ -129,6 +130,9 @@ class TradingEnv(gym.Env):
         self.t = 0
         self.print_nanwarning = True
         #print("episode reset!", self.sim_episode)
+        if self.sim_episode%20 == 0:
+            print(np.nanmean(self.actions), np.nanmin(self.actions), np.nanmax(self.actions))
+        self.actions = self.actions * np.nan
         return self.portfolio.get_state(self.t)
     
 
@@ -141,9 +145,12 @@ class TradingEnv(gym.Env):
         result = StepResult( episode=self.sim_episode, t=t)
 
         result.action_gamma = action
-        # gamma to notional
-        result.action_swaption = action/(
+        self.actions[t] = action
+        # gamma to notional 
+        result.action_swaption = -action*self.portfolio.get_gamma_local_hed(t)/(
             self.portfolio.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size)
+        
+
         assert not np.isnan(action).any(), action
         #if self.print_nanwarning and np.isnan(action).any():
         #    self.print_nanwarning = False
@@ -164,7 +171,7 @@ class TradingEnv(gym.Env):
         state = self.portfolio.get_state(self.t)
         if self.t == self.num_period-1:
             done = True
-            state[[2,3,4,7]] = 0 # all greeks to 0
+            state[[2,3,4]] = 0 # all greeks to 0
         else:
             done = False
         

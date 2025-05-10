@@ -168,7 +168,7 @@ class SwaptionPortfolio:
         price = self._base_options[t, t, Greek.PRICE]
         DVVOL = self._base_options[t, t, Greek.VEGA] * self._base_options[t, t, Greek.IV]
         #print(self._base_options[t, t, Greek.VEGA], self._base_options[t, t, Greek.IV],self._positions[t, t])
-        cost  = -abs(self.utils.spread * DVVOL * self._positions[t, t] )
+        cost  = -abs(self.utils.spread * price * self._positions[t, t] )
         return cost
 
     def get_metric(self, t: int, greek: int,
@@ -277,7 +277,7 @@ class MainPortfolio(AssetInterface):
         #self.a_price, self.vol = utils.init_env()
         hedge_swaption, liab_swaption, hedge_swap, liab_swap, liab_swaption_position, self.kernel_hed_all, self.kernel_liab_all, self.ttm_mat = utils.generate_swaption_market_data()
         print("initializing classes")
-        self.liab_port = SwaptionLiabilityPortfolio(utils, liab_swaption, liab_swaption_position)
+        self.liab_port = SwaptionLiabilityPortfolio(utils, liab_swaption, liab_swaption_position* utils.contract_size)
         self.hed_port: SwaptionPortfolio = SwaptionPortfolio(utils, hedge_swaption) 
         print("done initializing classes")
         # since we are concatenating hedge and liability matrix, we need to define an offset that for t gets the t column in hedge and t + offset in liability
@@ -398,20 +398,21 @@ class MainPortfolio(AssetInterface):
         gamma_port = self.get_gamma_local_hed(t)
         ttm = self.get_ttm_vec(t)[0]
 
-        # transforms
-        log_rate       = np.log1p(rate_hed)
-        log_vega       = np.log1p(vega_unit_hed)
-        log_gamma_unit = np.log1p(gamma_unit_hed)
-        log_cost       = np.log1p(hed_cost)
+        # # transforms
+        # log_rate       = np.log1p(rate_hed)
+        # log_vega       = np.log1p(vega_unit_hed)
+        # log_gamma_unit = np.log1p(gamma_unit_hed)
+        # log_cost       = np.log1p(hed_cost)
 
-        sign_gp        = np.sign(gamma_port)
-        log_gamma_port = np.log1p(abs(gamma_port))
+        # sign_gp        = np.sign(gamma_port)
+        # log_gamma_port = np.log1p(abs(gamma_port))
 
-        log_ttm        = np.log1p(ttm)
+        # log_ttm        = np.log1p(ttm)
         
-        state = np.array([log_rate,log_cost, log_vega, log_gamma_unit, log_gamma_port, log_ttm, 
-                          sign_gp, gamma_port], dtype=np.float32)
-        return state.astype(np.float32)
+        # state = np.array([log_rate,log_cost, log_vega, log_gamma_unit, log_gamma_port, log_ttm, 
+        #                   sign_gp], dtype=np.float32)
+        state_raw = np.array([rate_hed, hed_cost, vega_unit_hed, gamma_port, gamma_unit_hed, ttm])
+        return state_raw.astype(np.float32)
 
 
     def get_kernel_greek_risk(self, t):
@@ -433,7 +434,7 @@ class MainPortfolio(AssetInterface):
         k_coef_liab = self.kernel_coef_liab(t)
         current_delta_vec = self.get_delta_vec(t)
 
-        k12_raw = k_coef_hed[t+52]
+        k12_raw = k_coef_hed[t+self.liab_offset_idx]
         k21_raw = k_coef_liab[t]
         
         # Use stored results to compute local deltas

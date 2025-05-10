@@ -245,19 +245,33 @@ class PolicyWithHedge(snt.Module):
     def set_temperature(self, new_a: float):
         # call this once per learner step
         self._a.assign(new_a)
+
+    # @tf.function(jit_compile=True)
+    # def __call__(self, obs):
+    #     # unpack features
+    #     gamma_port      = tf.expand_dims(obs[..., -1], -1)
+    #     gamma_port_sign = tf.expand_dims(obs[..., -2], -1)
+    #     threshold       = self.base_pol(obs[..., :-1])
+    #     #threshold = tf.math.softplus(threshold)
+    #     # temperature‐scaled softplus
+    #     term = tf.abs(gamma_port) - threshold
+    #     a = self._a
+    #     action_gamma = -gamma_port_sign * tf.math.softplus(term / a) * a
+    #     #tf.print(threshold, term, action_gamma,a)
+    #     return action_gamma
     @tf.function(jit_compile=True)
     def __call__(self, obs):
         # unpack features
-        gamma_port      = tf.expand_dims(obs[..., -1], -1)
-        gamma_port_sign = tf.expand_dims(obs[..., -2], -1)
-        threshold       = self.base_pol(obs[..., :-1])
+        #gamma_port      = tf.expand_dims(obs[..., -1], -1)
+        #gamma_port_sign = tf.expand_dims(obs[..., -2], -1)
+        threshold       = self.base_pol(obs)
         #threshold = tf.math.softplus(threshold)
         # temperature‐scaled softplus
-        term = tf.abs(gamma_port) - threshold
-        a = self._a
-        action_gamma = -gamma_port_sign * tf.math.softplus(term / a) * a
+        #term = tf.abs(gamma_port) - threshold
+        #a = self._a
+        #action_gamma = -gamma_port_sign * tf.math.softplus(term / a) * a
         #tf.print(threshold, term, action_gamma,a)
-        return action_gamma
+        return threshold
 
 
 
@@ -336,11 +350,10 @@ class D4PGNetworks:
         # top to enable a simple form of exploration.
         # TODO(mwhoffman): Refactor this to remove it from the class.
         if sigma > 0.0:
-           stack += [
+            stack += [
                network_utils.ClippedGaussian(sigma),
                network_utils.ClipToSpec(environment_spec.actions),
-           ]
-
+            ]
         # Return a network which sequentially evaluates everything in the stack.
         return snt.Sequential(stack)
 
@@ -683,7 +696,7 @@ class GammaHedgeAgent(core.Actor):
 
         #alpha = (hed_share - low_val)/(high_val - low_val)
         
-        return np.array([-hedge_gamma])
+        return np.array([1])
 
     def observe_first(self, timestep: dm_env.TimeStep):
         pass
@@ -705,27 +718,27 @@ class DeltaHedgeAgent(core.Actor):
         super().__init__()
     
     def select_action(self, observation: types.NestedArray) -> types.NestedArray:
-        episode = self.env.sim_episode
-        t = self.env.t
+        # episode = self.env.sim_episode
+        # t = self.env.t
         
-        hed_share = 0
-        # action constraints
-        gamma_action_bound = -self.env.portfolio.get_gamma(t)/self.env.portfolio.hed_port.options[episode, t].gamma_path[t]/self.env.portfolio.utils.contract_size
-        action_low = [0, gamma_action_bound]
-        action_high = [0, gamma_action_bound]
+        # hed_share = 0
+        # # action constraints
+        # gamma_action_bound = -self.env.portfolio.get_gamma(t)/self.env.portfolio.hed_port.options[episode, t].gamma_path[t]/self.env.portfolio.utils.contract_size
+        # action_low = [0, gamma_action_bound]
+        # action_high = [0, gamma_action_bound]
         
-        if FLAGS.vega_obs:
-            # vega bounds
-            vega_action_bound = -self.env.portfolio.get_vega(t)/self.env.portfolio.hed_port.options[episode, t].vega_path[t]/self.env.portfolio.utils.contract_size
-            action_low.append(vega_action_bound)
-            action_high.append(vega_action_bound)
+        # if FLAGS.vega_obs:
+        #     # vega bounds
+        #     vega_action_bound = -self.env.portfolio.get_vega(t)/self.env.portfolio.hed_port.options[episode, t].vega_path[t]/self.env.portfolio.utils.contract_size
+        #     action_low.append(vega_action_bound)
+        #     action_high.append(vega_action_bound)
 
-        low_val = np.min(action_low)
-        high_val = np.max(action_high)
+        # low_val = np.min(action_low)
+        # high_val = np.max(action_high)
 
-        alpha = (hed_share - low_val)/(high_val - low_val)
+        # alpha = (hed_share - low_val)/(high_val - low_val)
         
-        return np.array([alpha])
+        return np.array([0])
 
     def observe_first(self, timestep: dm_env.TimeStep):
         pass

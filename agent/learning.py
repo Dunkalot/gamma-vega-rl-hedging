@@ -131,7 +131,7 @@ class D4PGLearner(acme.Learner):
         self._policy_optimizer = policy_optimizer or snt.optimizers.Adam(1e-4)
         # in D4PGLearner.__init__ (after reading initial_a, decay_steps, end_a, power)
         self._anneal_schedule = tf.keras.optimizers.schedules.PolynomialDecay(
-            initial_learning_rate=5.0,
+            initial_learning_rate=1.0,
             decay_steps=annealer_steps,
             end_learning_rate=0.01,
             power=1.0

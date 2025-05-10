@@ -29,26 +29,17 @@ class Utils:
         
         self.seed = seed
 
-        self.out_dir = "data/calm"
+        self.out_dir = "data/minimal"
         self.test_episode_offset = test_episode_offset
-        
+        self.test = test
         
         print(f"utils initiated with {spread=}, {poisson_rate=}, {n_episodes=}")
         
         print(f"\nMemory usage before lmm: {psutil.Process().memory_info().rss / 1e6:.2f} MB")
 
         
-        self.lmm:LMMSABR = LMMSABR(tau=tau,
-            resolution=resolution,
-            tenor=tenor,
-            sim_time=sim_time,
-            t_max=t_max,
-            beta=beta,
-            B=B,
-            swap_hedge_expiry=swap_hedge_expiry,
-            swap_client_expiry=swap_client_expiry
-        )
-        self.contract_size = np.float32(1000)
+        self.lmm:LMMSABR = LMMSABR(tenor=1, resolution=63, tau=0.25, sim_time=30/252, swap_client_expiry=60/252, swap_hedge_expiry=30/252)
+        self.contract_size = np.float32(100)
         print("!!!! CONTRACT SIZE IS ", self.contract_size)
         print(f"\nXXXXXXXXXXXXXXXXXXXXXX\n The spread is {spread}   \n nXXXXXXXXXXXXXXXXXXXXXX")
         self.swap_spread = np.float32(0) # TODO: set it to something other than 0
