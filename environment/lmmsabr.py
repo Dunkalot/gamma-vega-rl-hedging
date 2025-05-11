@@ -33,7 +33,10 @@ def _simulate_core(f_sim, k_mat, g_mat, h_mat, phi_mat, rho_mat,
                    dZ_f, dW_s, n_steps, dt, tau,
                    rev_short, rev_ids, ttm_mat, beta,
                    sub_steps=1):
+    
+    canon_i_diff = np.abs(rev_ids[1]-rev_ids[0])
     for t in range((n_steps  - 1)* sub_steps):
+        
         drift_sum = 0.0
         for short_i, canon_i in zip(rev_short, rev_ids):
             if ttm_mat[t // sub_steps, canon_i] + tau + 1e-8 < 0:
@@ -48,7 +51,7 @@ def _simulate_core(f_sim, k_mat, g_mat, h_mat, phi_mat, rho_mat,
             f_beta = f_t ** beta
 
             gkfb = g_it * k_it * f_beta
-            phk = phi_mat[short_i, short_i] * h_it * k_it
+            phk = phi_mat[canon_i, canon_i] * h_it * k_it
 
             drift_f = -gkfb * drift_sum
             drift_k = -phk * drift_sum
@@ -65,7 +68,7 @@ def _simulate_core(f_sim, k_mat, g_mat, h_mat, phi_mat, rho_mat,
                 k_mat[idx, canon_i] = k_new if k_new > 0 else 1.e-6
 
             if short_i > 0:
-                corr = rho_mat[short_i-1, short_i] * tau * gkfb / (1 + tau * f_t)
+                corr = rho_mat[canon_i-canon_i_diff, canon_i] * tau * gkfb / (1 + tau * f_t)
                 drift_sum += corr
     return f_sim, k_mat
 
@@ -541,10 +544,11 @@ def create_df_init(df_fwd, df_raw_spot, resolution, tau=0.5):
     return df
 
 
-#def interp_zcb_hed_liab(self, hed_idx, liab_idx):
 
 
-def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolated=None, g_func=None, interp_vol = False, zcb_interp = False):
+
+
+def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolated=None, g_func=None, interp_vol = False, zcb_interp = False,g_mat_supp=None):
     df = df_init
     #fwd = df['Forward'].values # only used for test, not to be uncommented
 
@@ -559,7 +563,6 @@ def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolat
     theta = (df['mod_accrual'].values)
     gamma = (df['gamma'].values)
     gamma_theta = gamma * theta
-    self.gamma_theta = gamma_theta
     #print(f"{len(i_s)}, {len(i_e)}")
         
 
@@ -577,86 +580,32 @@ def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolat
 
 
         def build_forward_zcb_matrix_from_f_sim(f_sim_input, max_tenor=12):
-            """
-            Compute a forward zero-coupon bond (ZCB) matrix P[t,e](t) in a fully vectorized manner,
-            but only for maturities up to max_tenor (in years) beyond the current time.
-            
-            Parameters
-            ----------
-            f_sim : np.ndarray, shape (n, n)
-                Simulated forward rate matrix. f_sim[t, i] is the forward rate observed at time t
-                for the interval starting at the tenor corresponding to index i.
-            gamma_theta : np.ndarray, shape (n,)
-                Effective stub accrual factors (γ[i] * θ[i]) for each tenor.
-            tau : float
-                Canonical accrual period (e.g., 0.5 years).
-            resolution : int
-                Number of time steps per tau (e.g., 2 means grid spacing of tau/resolution, i.e., 0.25 years if tau=0.5).
-            max_tenor : float
-                Maximum tenor (in years) ahead of the current time for which to calculate ZCB prices.
-            
-            Returns
-            -------
-            P : np.ndarray, shape (n, n)
-                The forward zero-coupon bond (ZCB) matrix such that P[t, e] = P(t, e)
-                for e >= t and for e <= t + max_steps. Entries for e < t or e > t + max_steps are set to NaN.
-            """
             f_sim = f_sim_input.copy()
-            f_sim[np.isnan(f_sim)] = 0
-            n = f_sim.shape[0]
-            gamma_theta_trunc = gamma_theta[:n]  # Ensure gamma_theta is the same length as f_sim
-            # --- Stub Start: for each row t, discount from t to the next stub endpoint.
-            stub_start = 1.0 / (1.0 + np.diag(f_sim) * gamma_theta_trunc)  # shape (n,)
-            
-            # --- Stub End: for each (t,e), discount adjustment for the end stub.
-            stub_end = 1.0 + f_sim * gamma_theta_trunc[np.newaxis, :]  # shape (n, n)
-            
-            # --- Canonical Product
-            # Define canonical grid indices: these are every 'resolution' step.
-            can = np.arange(0, n, resolution)  # e.g., [0, resolution, 2*resolution, ...]
-            n_can = len(can)
-            
-            # Build a matrix M: for each row t, M[t, j] = 1/(1 + f_sim[t, can[j]] * tau)
-            M = 1.0 / (1.0 + f_sim[:, can] * tau)  # shape (n, n_can)
-            # Cumulative product along the canonical axis
-            CP = np.cumprod(M, axis=1)  # shape (n, n_can)
-            
-            # For each row t, define J_s = floor(t/resolution) + 1 (starting canonical index)
-            t_idx = np.arange(n)
-            J_s = (t_idx // resolution) + 1  # shape (n,)
-            # For each column e, define J_e = floor(e/resolution)
-            J_e = np.arange(n) // resolution  # shape (n,)
-            
-            # Broadcast J_s and J_e to form matrices
-            J_s_mat = J_s[:, None]  # shape (n, 1)
-            J_e_mat = J_e[None, :]  # shape (1, n)
-            
-            # Get canonical cumulative product:
-            A = CP[np.arange(n)[:, None], J_e_mat]  # shape (n, n)
-            B = np.where(J_s_mat > 0,
-                        CP[np.arange(n)[:, None], (J_s_mat - 1)],
-                        1.0)
-            # Canonical product for each (t,e)
-            canon_prod = np.where(J_s_mat <= J_e_mat, A / B, 1.0)
-            
-            # --- Combine All Terms: full ZCB from t to e
-            stub_start_matrix = stub_start[:, None]  # shape (n, 1)
-            P = stub_start_matrix * canon_prod * stub_end  # shape (n, n)
-            
-            # Ensure lower-triangular entries (e < t) are NaN and diagonal is 1.
-            P = np.triu(P, k=0)
-            np.fill_diagonal(P, 1.0)
-            
-            # --- Apply max_tenor: Only keep P[t,e] for e <= t + max_steps.
+            f_sim[np.isnan(f_sim)] = 0.0
+            T, n = f_sim.shape
+            can = np.arange(0, n, resolution)
+            n_can = can.size
+            ti = np.arange(T)
+            ci = np.minimum(ti // resolution + 1, n_can - 1)
+            ng = can[ci]
+            sd = 1.0 / (1.0 + f_sim[ti, ng] * gamma_theta[ng])
+            dfc = 1.0 / (1.0 + f_sim[:, can] * tau)
+            cpc = np.cumprod(dfc, axis=1)
+            denom = np.ones(T, dtype=float)
+            m = ci > 0
+            denom[m] = cpc[m, ci[m] - 1]
+            P = np.full((T, n), np.nan)
+            P[:, can] = sd[:, None] * (cpc / denom[:, None])
+            P[ti, ci] = 1.0
             max_steps = int(max_tenor * resolution / tau)
-            row_indices = np.arange(n)[:, None]
-            col_indices = np.arange(n)[None, :]
-            mask = col_indices > (row_indices + max_steps)
+            limit = ti // resolution + max_steps
+            cols = np.arange(n)[None, :]
+            mask = cols > limit[:, None]
             P[mask] = np.nan
-            # set lower triangle to nan
-            P[np.tril_indices(n, k=-1)] = np.nan
-            P[:,-resolution:] = np.nan
             return P
+
+
+
 
     if interp_vol:
         fwd = df['Forward'].values
@@ -674,7 +623,7 @@ def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolat
 
         tenors = df['Tenor'].values
         ttm_mat = tenors[None, :] - tenors[:, None]
-        g_mat = g_func(ttm_mat)
+        g_mat = g_mat_supp
 
         def get_interp_vol_matrix(s_mat,f_mat):
             """
@@ -706,96 +655,15 @@ def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolat
 
 
 
-        if zcb_interp:
-            return get_interp_rates, get_interp_vol_matrix, build_forward_zcb_matrix_from_f_sim
-        else:
-            return get_interp_rates, get_interp_vol_matrix
-    
-    return get_interp_rates
+    if zcb_interp and interp_vol:
+        return get_interp_rates, get_interp_vol_matrix, build_forward_zcb_matrix_from_f_sim
+    elif interp_vol:
+        return get_interp_rates, get_interp_vol_matrix, None
+    elif zcb_interp:
+        return get_interp_rates, None, build_forward_zcb_matrix_from_f_sim
+    else:
+        return get_interp_rates
 
-
-def get_swap_matrix(f_sim, shape, resolution, tau, tenor, df, expiry_max=1, expiry_min=1, beta=0.5, B=0.5):
-    """
-    Compute time-evolving swap rates from a simulated forward path for a set of swap expiries.
-
-    Parameters:
-    - f_sim: np.ndarray, shape (n_steps, n_forwards)
-        Simulated forward curve matrix (lower-triangular in time).
-    - T_idxs: list or np.ndarray of int
-        Forward indices (expiry) at which each swap starts.
-    - resolution: int
-        Number of simulation steps per accrual period (tau).
-    - tau: float
-        Accrual period of the swap (e.g., 0.5 for semiannual).
-    - tenor: float
-        Total length of the swap in years (e.g., 1.0 for a 1y swap).
-    - df: pd.DataFrame
-        DataFrame containing initial zero-coupon bond prices in column 'zcb'.
-    - expiry: float, optional
-        If provided, the maximum length of a simulated swap path will be limited to this value (in year units).
-    Returns:
-    - swap_paths: np.ndarray, shape (n_valid_steps, n_swaps)
-        Matrix of swap rates over time for each swap expiry.
-    - valid_steps: np.ndarray
-        Array of time steps for which all required forward rates exist.
-    - used_T_idxs: np.ndarray
-        Final T_idxs that were valid and included in the result.
-    """
-    f_sim = np.asarray(f_sim)
-    expiry_min_idx = int(expiry_min * resolution / tau)
-    n_swaps = np.arange(shape[1]+expiry_min_idx)
-    zcbs = df['zcb'].values
-
-    n_steps, n_forwards = f_sim.shape
-    n_payments = int(tenor / tau)
-    swap_len = n_payments  # number of forward rates needed
-
-    # Compute max usable T_idx based on number of forward rates
-    #max_T_idx = n_forwards -   swap_len * resolution
-    #n_swaps = n_swaps # we remove the first columns afterwards so that the first column has expiry_min time to expiry
-    if len(n_swaps) == 0:
-        raise ValueError("No valid T_idxs remain after filtering based on swap length and resolution.")
-
-    # Compute all valid time steps
-    t_end = shape[0]
-    valid_steps = np.arange(0, t_end, dtype=np.int32)
-
-    # Compute forward rate indices for each swap
-    forward_offsets = np.arange(n_payments) * resolution
-    col_indices = n_swaps[:, None] + forward_offsets[None, :]
-    # Check bounds
-    if np.any(col_indices >= n_forwards):
-        raise IndexError("Computed forward indices exceed available f_sim columns.")
-
-    # Compute ZCB indices needed for annuity weights
-    zcb_offsets = np.arange(1,n_payments+1) * resolution
-    zcb_indices = n_swaps[:, None] + zcb_offsets[None, :]
-    if np.any(zcb_indices >= len(zcbs)):
-        raise IndexError("Computed ZCB indices exceed available zcb entries.")
-    
-
-    # Compute frozen swap weights
-    zcb_sets = np.stack([zcbs[idxs] for idxs in zcb_indices])
-    swap_weights = zcb_sets * tau
-    annuity = np.sum(swap_weights, axis=1, keepdims=True)
-    swap_weights = swap_weights / annuity  # Normalize to 1
-    # Gather simulated forward rate and volatility slices
-    f_curves = f_sim[valid_steps]
-    fwd_subsets = np.stack([f_curves[:, idxs] for idxs in col_indices], axis=1)
-
-    #print(fwd_subsets.shape)
-    # Compute weighted sum (dot product): (n_valid_steps, n_swaps)
-    swap_paths = np.einsum('tsp,sp->ts', fwd_subsets, swap_weights)
-    swap_paths[np.triu_indices_from(swap_paths, k=int(expiry_max*resolution/tau+1))] = np.nan  # Set upper triangle to NaN
-
-    # Compute W: (n_valid_steps, n_swaps, n_payments)
-    swaps_expanded = swap_paths[:, :, None]  # (n_valid_steps, n_swaps, 1)
-    W = swap_weights[None, :, :] * (fwd_subsets**beta) / (swaps_expanded**B)  # default: beta=0.5, B=0.5
-    #print(swap_weights)
-    #W = np.nan_to_num(W)
-    
-
-    return swap_paths[:,expiry_min_idx:], W[:,expiry_min_idx:] # we start cut the first columns so the first column has has expiry_min time to expiry
 
 
 def make_swap_indexer(n_steps, swap_idxs, resolution, tau, tenor, expiry, return_indices=False):
@@ -893,8 +761,8 @@ def min_max_rebonato_vol(params, max_allowed=np.inf):
 def sample_phi_matrix_batch(
     T,
     n_samples=100,
-    phi_short=-0.65,
-    phi_long=-0.5,
+    phi_short=-0.50,
+    phi_long=-0.4,
     lambda3_range=(0.005, 0.05),
     lambda4_range=(0.01, 0.07)
 ):
@@ -1104,17 +972,19 @@ def sample_positive_rebonato_params(n_samples=1,max_allowed = 100, seed=None, vo
 class LMMSABR:
     def __init__(
         self,
+        imm,
         tau=0.5,
         resolution=2,
         tenor=1,
         sim_time = 1,
         t_max=None,
         beta=0.5,
-        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2
+        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2,sub_steps=None
         
         
     ):
         
+        self.imm = imm
         self.samples = None
         self.tau = tau
         self.resolution = resolution
@@ -1123,6 +993,13 @@ class LMMSABR:
         self.B = B
         self.sim_time = sim_time
         self.primed = False
+        self.cov_big = False
+        if sub_steps:
+            self.sub_steps = sub_steps
+        elif self.dt < 1/100:
+            self.sub_steps=1
+        else:
+            self.sub_steps = 2
         # swap params
         self.prime_swap_data(swap_hedge_expiry, swap_client_expiry, tenor)
 
@@ -1133,16 +1010,28 @@ class LMMSABR:
             self.t_max = t_max
         self.t_max = self.t_max
         self.t_arr = np.linspace(0, self.t_max, int(self.t_max/self.dt +1))
-        ttm_mat = self.t_arr[None, :] - self.t_arr[:,None]
-        self.ttm_mat = ttm_mat
-        self.swap_indexer, self.swap_indices = make_swap_indexer(n_steps = len(self.t_arr), swap_idxs = self.swap_idxs,resolution=self.resolution, tau=tau, tenor=self.tenor,expiry=self.max_swap_expiry, return_indices=True)
+        #print(self.t_arr[None, :] - self.t_arr[:,None])
+        self.ttm_mat = (self.t_arr[None, :] - self.t_arr[:,None])[:self.swap_sim_shape[0]]
+        self.n_steps = self.ttm_mat.shape[0]
+        self.f_sim_dims = self.swap_sim_shape[0], self.ttm_mat.shape[1]
+        if imm:
+            swap_rows = self.swap_idxs[0]
+            swap_cols = np.array([self.swap_hedge_expiry_idx, self.swap_liab_expiry_idx])
+        else:
+            swap_rows, swap_cols = self.swap_idxs
+        
+        self.swap_indexer, self.swap_indices = make_swap_indexer(n_steps = len(self.t_arr), swap_idxs = (swap_rows, swap_cols),resolution=self.resolution, tau=tau, tenor=self.tenor,expiry=self.max_swap_expiry, return_indices=True)
 
+        self.f_sim = np.full(self.f_sim_dims, np.nan)
+        self.k_mat = np.full_like(self.f_sim, np.nan)
 
     def prime_swap_data(self, swap_hedge_expiry, swap_client_expiry, tenor):
         self.tenor = tenor
         assert swap_hedge_expiry != swap_client_expiry, "swap_hedge_expiry and swap_client_expiry should be different"
         self.swap_hedge_expiry = swap_hedge_expiry
+        self.swap_hedge_expiry_idx = self.t_to_idx(self.swap_hedge_expiry)
         self.swap_liab_expiry = swap_client_expiry
+        self.swap_liab_expiry_idx = self.t_to_idx(self.swap_liab_expiry)
         self.max_swap_expiry = np.maximum(self.swap_hedge_expiry, self.swap_liab_expiry)
         self.min_swap_expiry = np.minimum(self.swap_hedge_expiry, self.swap_liab_expiry)
         self.swap_hedge_expiry_relative = self.swap_hedge_expiry - self.min_swap_expiry
@@ -1164,9 +1053,9 @@ class LMMSABR:
         n_samples=1,
         n_curves=None,
         random_curves = False,
-        rho_kwargs={'eta_range':(0.2020,0.2020), 'lambda_range':(1.5456,1.5456)},
-        theta_kwargs={'eta_range':( 0.0465, 0.0465), 'lambda_range':( 0.4417, 0.4417)},
-        phi_kwargs={'lambda3_range': (0.0087931,0.0087931), 'lambda4_range': (0.051319,0.051319)},
+        rho_kwargs={'eta_range':(0.0,0.0), 'lambda_range':( 0.0121, 0.0121)},
+        theta_kwargs={'eta_range':(0.0,0.0), 'lambda_range':( 0.0121, 0.0121)},
+        phi_kwargs={'lambda3_range': (0.0087931,0.0087931), 'lambda4_range': (0.0051319,0.0051319), 'phi_short':-0.6, 'phi_long':-0.5},
         g_kwargs={'params':(-0.013,0.0287,0.5272,0.0268)},
         h_kwargs={'params':(0.5727,0.0002,2.3035,0.2757)},
         fwd_kwargs=None,
@@ -1285,93 +1174,20 @@ class LMMSABR:
         self.g = partial(get_instant_vol_func, params=self.g_params)
         self.h = partial(get_instant_vol_func, params=self.h_params)
         #self.interpolate_corr_matrices()
+        self.precompute_instant_vol()
         self.prepare_curves()
         self.rho_tensor = self.build_swap_correlation_tensor(self.rho_mat)
         self.theta_tensor = self.build_swap_correlation_tensor(self.theta_mat)
         self.phi_tensor = self.build_swap_correlation_tensor(self.phi_mat)
-        self.G_tensor = self.precompute_G_tensor()
-        self.ggh_tensor = self.build_V_tensor_from_scalar(tenor=self.tenor, resolution=self.resolution, tau=self.tau)[np.ix_(self.swap_idxs[0], self.swap_idxs[1])]
+        self.gg_tensor, self.ggh_tensor = self.precompute_gg_and_ggh_tensor()
         self.primed = True
- 
+        
     def get_sample_meta(self, sample_idx=0):
         if self.samples is None:
             raise ValueError("No samples loaded.")
         return self.samples[sample_idx]["meta"]
 
 
-    def integral_term_V(self, t_idx, T_idx, i, j):
-        """
-        Compute the integral:
-            ∫ₜᵀ g_i(u)*g_j(u)*[h_ij(t,u)]²*(u-t) du,
-        where
-            h_{ij}(t,u) = sqrt( (∫ₜᵤ h(T_i-s)*h(T_j-s) ds) / (u-t) ).
-        
-        This vectorized version uses cumulative trapezoidal integration on self.t_arr.
-        
-        Parameters
-        ----------
-        t_idx : int
-            Index in self.t_arr corresponding to time t.
-        T_idx : int
-            Index in self.t_arr corresponding to time T.
-        i : int
-            Index for T_i in self.t_arr.
-        j : int
-            Index for T_j in self.t_arr.
-        
-        Returns
-        -------
-        result : float
-            The computed integral.
-        """
-        # Get the time grid segment from t to T:
-        t_arr = self.t_arr  # full time grid, assumed 1D numpy array
-        t = t_arr[t_idx]
-        T = t_arr[T_idx]
-        
-        if T <= t:
-            return 0.0
-
-        # Define the integration domain (u = integration variable)
-        u_arr = t_arr[t_idx:T_idx+1]
-        t = t_arr[t_idx]
-        delta = u_arr - t  # vector of (u - t)
-
-        # Compute h_i(u) and h_j(u) over the integration range
-        h_i_all = self.h(t_arr[i] - u_arr)
-        h_j_all = self.h(t_arr[j] - u_arr)
-
-        # Elementwise product
-        h_prod = h_i_all * h_j_all
-
-        # Cumulative trapezoidal integration over u_arr
-        integrals_full = cumulative_trapezoid(h_prod, u_arr, initial=0)
-
-        # Compute ∫ₜᵘ [...] as I(u) - I(t) = integrals_full - integrals_full[0]
-        I_segment = integrals_full  # already matches u_arr
-        
-        # Compute the integrated value over [t, u] as I(u) - I(t)
-        # Avoid division by 0 by setting very small delta values to np.nan (or zero)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            ratio = np.divide(I_segment - integrals_full[t_idx],
-                            delta,
-                            out=np.zeros_like(delta),
-                            where=delta>1e-10)
-        
-        # Compute h_ij(t, u) for each u in u_arr:
-        h_ij_vals = np.sqrt(ratio)
-        
-        # Compute g_i(u) and g_j(u) on the same slice:
-        g_i_vals = self.g(self.t_arr[i] - u_arr)
-        g_j_vals = self.g(self.t_arr[j] - u_arr)
-        
-        # Now, the integrand becomes: 
-        # g_i(u)*g_j(u)*[h_ij(t,u)]^2*(u-t)
-        integrand = g_i_vals * g_j_vals * (h_ij_vals**2) * delta
-        
-        # Finally, integrate using the trapezoidal rule over u_arr:
-        result = np.trapz(integrand, u_arr)
-        return result
 
     
     def build_swap_correlation_tensor(self, corr_mat):
@@ -1400,97 +1216,41 @@ class LMMSABR:
         return corr_tensor        
     
 
-    def build_V_tensor_from_scalar(self, tenor, resolution, tau):
+
+
+
+
+    def precompute_gg_and_ggh_tensor(self):
+        """  
+        Precompute gg_tensor and ggh_tensor over the swap-tenor grid using memoization.
+
+        G_tensor[i_t, j_T, i_local, j_local]
+            = ∫_{t}^{T} g_i(u) * g_j(u) du
+
+        ggh_tensor[i_t, j_T, i_local, j_local]
+            = ∫_{t}^{T} g_i(u) * g_j(u) * H_ij(u) du,
+        where H_ij(u) = ∫_{t}^{u} h_i(s) * h_j(s) ds.
         """
-        Build the V_tensor using scalar integral_term_V, memoizing based on
-        time-translation invariance.
-
-        Returns:
-        - V_tensor: np.ndarray, shape (n_t, n_t, n, n)
-        """
-        tenor = self.tenor
-        resolution = self.resolution
-        tau = self.tau
-        max_expiry = self.max_swap_expiry
-        n = int(tenor / tau)
-        max_expiry_steps = int(max_expiry * resolution / tau)
-        num_t = len(self.t_arr) - n * resolution
-        n_swap_t = len(self.swap_idxs[0])
-        V_tensor = np.full((n_swap_t, num_t, n, n), np.nan)
-        cache = {}  # key: (delta_T, delta_i, delta_j) -> float
-
-        for t_idx in range(n_swap_t):
-            expiry_limit = min(t_idx + max_expiry_steps+1, num_t)
-
-            for T_idx in range(t_idx, expiry_limit):
-
-                start_idx = T_idx
-                end_idx = T_idx + n * resolution
-                indices = list(range(start_idx, end_idx, resolution))
-
-
-                delta_T = T_idx - t_idx
-
-                for i_local, i_global in enumerate(indices):
-                    for j_local, j_global in enumerate(indices):
-                        delta_i = i_global - T_idx
-                        delta_j = j_global - T_idx
-
-                        key = (delta_T, delta_i, delta_j)
-
-                        if key not in cache:
-                            # Compute and store
-                            cache[key] = self.integral_term_V(
-                                t_idx, T_idx, i_global, j_global
-                            )
-                            
-
-                        V_tensor[t_idx, T_idx, i_local, j_local] = cache[key]
-        return V_tensor
-
-
-    def precompute_G_tensor(self):
-        """
-        Precompute a G_tensor using memoization and the self.t_arr as integration grid.
-        Uses:
-            G[t_idx, T_idx, i_local, j_local] = ∫ₜᵀ g(T_i - u) * g(T_j - u) du
-        with T_i, T_j based on T_idx and forward rate spacing.
-        """
-
+        G_tensor = np.zeros((self.swap_indices[1].shape +self.swap_indices[1][-1,-1].shape ))*np.nan
+        ggh_tensor = np.zeros((self.swap_indices[1].shape +self.swap_indices[1][-1,-1].shape ))*np.nan
         t_arr = self.t_arr
-        resolution = self.resolution
-        tau = self.tau
-        tenor = self.tenor
-        max_expiry = self.max_swap_expiry
-
-        num_t = len(t_arr) - int(tenor * resolution / tau)#-self.t_to_idx(self.min_swap_expiry)
-        n_swap_t = len(self.swap_idxs[0])
-        n = int(tenor / tau)
-        G_tensor = np.zeros((n_swap_t, num_t, n, n))*np.nan
-        # set the diagonal of the n,m,k,l tensor to 0
-        G_tensor[np.diag_indices(n_swap_t)] = 0
+        t_arr_swap = self.swap_idxs[0]
+        T_arr_swap = self.swap_indices[1][0][:,0]
         cache = {}  # (delta_T_idx, delta_i, delta_j) → float
-        max_expiry_idx = int(max_expiry * resolution / tau)  # max expiry in steps
-        for t_idx in range(n_swap_t):
-            for T_idx in range(np.maximum(t_idx -self.t_to_idx(self.min_swap_expiry), 0), num_t):
+        cache_ggh = {}
+        g_vec = self.g_mat[0] # max expiry in steps
+        h_vec = self.h_mat[0]
+        if self.imm:
+            T_arr_swap = [self.swap_hedge_expiry_idx,self.swap_liab_expiry_idx]
+        for i_t, t_idx in enumerate(t_arr_swap):
+            for j_T, T_idx in enumerate(T_arr_swap):
+                
                 delta_T_idx = T_idx - t_idx
-                # check for max expiry
-                if delta_T_idx > max_expiry_idx:
-                    continue
-                # Use the actual model time grid for integration
-                s_idx_start = t_idx   # strictly > t
-                s_idx_end = T_idx + 1    # include T
-                u_arr = t_arr[s_idx_start:s_idx_end]
-                if len(u_arr) < 1:
-                    G_tensor[t_idx, T_idx] = np.nan#np.zeros((n, n))  # no integration needed
-                    #print("Skipping integration for empty u_arr at indices:", s_idx_start, s_idx_end)
-                    continue  # skip if no points to integrate over
+                # real time from now to expiry
+                rows = np.arange(t_idx, T_idx+1)
+                u_arr = t_arr[rows]
 
-                start_idx = T_idx
-                end_idx = T_idx + n * resolution
-                indices = list(range(start_idx, end_idx, resolution))
-                if len(indices) != n:
-                    continue  # incomplete swap
+                indices = self.swap_indices[1][1][j_T,:]
 
                 for i_local, i_global in enumerate(indices):
                     for j_local, j_global in enumerate(indices):
@@ -1499,15 +1259,24 @@ class LMMSABR:
                         key = (delta_T_idx, delta_i, delta_j)
 
                         if key not in cache:
-                            T_i = t_arr[i_global]
-                            T_j = t_arr[j_global]
-                            g_i = self.g(T_i - u_arr)
-                            g_j = self.g(T_j - u_arr)
-                            cache[key] = np.trapz(g_i * g_j, u_arr)
+                            i_idx = i_global - rows
+                            j_idx = j_global - rows
+                            g_i = g_vec[i_idx]
+                            g_j = g_vec[j_idx]
+                            h_i_all = h_vec[i_idx]
+                            h_j_all = h_vec[j_idx]
 
-                        G_tensor[t_idx, T_idx, i_local, j_local] = cache[key]
-        idxs = np.ix_(self.swap_idxs[0],self.swap_idxs[1])
-        return G_tensor[idxs]
+                            # Elementwise product
+                            h_prod = h_i_all * h_j_all
+                            # Compute ∫ₜᵘ [...] as I(u) - I(t) = integrals_full - integrals_full[0]
+                            integrals_full = cumulative_trapezoid(h_prod, u_arr, initial=0)
+                            h_hat_sq_t = integrals_full  # already matches u_arr
+                            cache[key] = np.trapz(g_i * g_j, u_arr)
+                            cache_ggh[key] = np.trapz(g_i * g_j * h_hat_sq_t, u_arr)
+                        G_tensor[i_t, j_T, i_local, j_local] = cache[key]
+                        ggh_tensor[i_t, j_T, i_local, j_local] = cache_ggh[key]
+
+        return G_tensor, ggh_tensor
 
 
     def prepare_curves(self, shuffle_df=True, seed=None):
@@ -1517,13 +1286,23 @@ class LMMSABR:
         else:
             print("RANDOM CURVES SET TO FALSE! SAMPLING ONLY THE FIRST CURVE EACH TIME")
             self.df_init = self.df_init
-        self.df_init: pd.DataFrame = self.df_init.query(f"Tenor <= {self.t_max + 1e-6}")
+        mask = self.df_init["Tenor"] <= self.t_max + 1e-6
+        self.df_init = self.df_init.loc[mask]
         self.tenors = self.df_init["Tenor"].values
-        self.t_arr = self.tenors
+        
         self.ids_fwd_canon = self.df_init["Forward"].dropna().index.values
+        
         self.num_forwards = len(self.ids_fwd_canon)
-        self.n_steps = len(self.df_init)
+        ids_ix = np.ix_(self.ids_fwd_canon,self.ids_fwd_canon)
+        if not self.cov_big:
+            print("Creating combined covariance matrix...")
+            top    = np.hstack([self.rho_mat[ids_ix],      self.phi_mat[ids_ix]])
+            bottom = np.hstack([self.phi_mat[ids_ix].T,    self.theta_mat[ids_ix]])
 
+            Sigma_sub  = np.vstack([top, bottom])
+            #self._L = np.linalg.cholesky(Sigma_sub)
+            self.sigma_big = Sigma_sub
+            self.cov_big = True
 
         self.interp_func, self.interp_vol_func, self.zcb_interp_func = interp_func_fac(
             self.df_init,
@@ -1531,8 +1310,9 @@ class LMMSABR:
             tau=self.tau,
             rho_mat_interpolated=self.rho_mat,
             g_func=self.g,
-            interp_vol=True,
-            zcb_interp=True,beta=1
+            interp_vol=True if not self.imm else False,
+            zcb_interp=True,beta=1,
+            g_mat_supp=self.g_mat
         )
 
 
@@ -1552,24 +1332,19 @@ class LMMSABR:
     
     def simulate_forwards(self, seed=None, minimum_starting_rate=0.01):
         # initialize RNG
-        sub_steps = self.sub_steps
         rng    = np.random.default_rng(seed)
         m      = self.num_forwards
-        n      = self.n_steps - 1
+        ids = self.ids_fwd_canon
+        n      = self.swap_sim_shape[0] - 1
         dt     = self.dt
-        dt_sub = dt / sub_steps
+        dt_sub = dt / self.sub_steps
+        dt_sub_sqrt = np.sqrt(dt_sub)
         # build joint covariance and draw all shocks at once
-        top    = np.hstack([self.rho_mat[:m, :m],      self.phi_mat[:m, :m]])
-        bottom = np.hstack([self.phi_mat[:m, :m].T,    self.theta_mat[:m, :m]])
-        Sigma_sub  = np.vstack([top, bottom]) * dt_sub
+
 
         # one call to MVN: shape = (n, 2m)
-        all_shocks = rng.multivariate_normal(
-            mean = np.zeros(2*m),
-            cov  = Sigma_sub,
-            size = n * sub_steps
-        )
-
+        #Z = rng.standard_normal(size=(n * sub_steps, 2 * m))
+        all_shocks = rng.multivariate_normal(np.zeros(2 * m), self.sigma_big*dt_sub, (n * self.sub_steps)) # Z @ self._L
         # slice into dZ_f and dW_s
         self.dZ_f = all_shocks[:, :m]
         self.dW_s = all_shocks[:,  m:]
@@ -1582,13 +1357,17 @@ class LMMSABR:
         # apply the shift
         f_0 = f_0 + shift
         
-        self.f_sim = np.full((self.n_steps, len(f_0)), np.nan)
-        self.k_mat = np.full_like(self.f_sim, np.nan)
+        
         self.f_sim[0] = f_0   # temporary adjustment
         self.k_mat[0] = np.ones_like(f_0)
 
         self._simulate_forward_dynamics()
-        self._interpolate_vol()  # ex-post interpolation of vol
+        if not self.imm:
+            self._interpolate_vol()  # ex-post interpolation of vol
+        # else: 
+        #     all_idx     = np.arange(self.f_sim.shape[1])
+        #     non_canon   = np.setdiff1d(all_idx[:-self.resolution], self.ids_fwd_canon)
+        #     self.f_sim[:, non_canon] = self.interp_func(self.f_sim)[:,non_canon]
 
 
 
@@ -1597,8 +1376,8 @@ class LMMSABR:
 
         ids         = self.ids_fwd_canon
         ids_short   = ids // self.resolution
-        rev_idx     = ids[::-1]
-        rev_short   = ids_short[::-1]
+        rev_idx     = ids[::-1].tolist()
+        rev_short   = ids_short[::-1].tolist()
         
         self.f_sim, self.k_mat = _simulate_core(
             f_sim=self.f_sim, 
@@ -1625,26 +1404,33 @@ class LMMSABR:
         self.s_mat = s_mat
         self.k_mat_interp = self.interp_vol_func(s_mat, self.f_sim)
 
-        self.s_mat_interp = self.k_mat_interp * self.g(self.ttm_mat)[:,:self.k_mat_interp.shape[1]]
+        self.s_mat_interp = self.k_mat_interp * self.g_mat[:,:self.k_mat_interp.shape[1]]
         all_idx     = np.arange(self.f_sim.shape[1])
         non_canon   = np.setdiff1d(all_idx[:-self.resolution], self.ids_fwd_canon)
         self.f_sim[:, non_canon] = self.interp_func(self.f_sim)[:,non_canon]
 
         
 
-    def simulate(self, shuffle_df=True,seed=None,minimum_starting_rate=0.01, sub_steps = 2):
+    def simulate(self, shuffle_df=True,seed=None,minimum_starting_rate=0.01):
         """use more substeps in more volatilie regimes.
         Signs there are too few substeps are rates reaching the 0 absorbing boundary often. 
         plot f_sim to check."""
-        self.sub_steps = sub_steps
         #start_time = time.time()
+        #self.precompute_instant_vol()cc
         self.prepare_curves(shuffle_df=shuffle_df, seed=seed)
-        self.precompute_instant_vol()
         self.simulate_forwards(seed=seed, minimum_starting_rate=minimum_starting_rate)
 
         return self.f_sim
     
-    
+    def zcb_interp_imm(self):
+        T = self.f_sim.shape[0]
+        zcb = 1/(1 + np.diag((self.df_init['gamma'].values*self.df_init['mod_accrual'].values)[None,:T]*self.f_sim[:, self.df_init['i_s'][:T]]))
+        P = (1/(1+self.f_sim[:,:-self.resolution]*self.tau))
+        P[:,0] = zcb 
+
+        P[:,self.resolution:] = np.nancumprod(P, axis=1)[:,:-self.resolution]
+        P[:,0] = np.nan
+        return P
 
     def get_swap_matrix(self):
         """
@@ -1655,7 +1441,11 @@ class LMMSABR:
         """
 
         # zcb and indexing, creating n_steps, n_swaps, n_fixings, n_fixings tensor
-        P             = self.zcb_interp_func(self.f_sim)
+        if self.imm:
+            P         = self.zcb_interp_imm()
+        else:
+            P         = self.zcb_interp_func(self.f_sim)
+        self.P = P
         P_sets        = self.swap_indexer(P)         # P^f(t, T_{leg})
         fwd_subsets   = self.swap_indexer(self.f_sim)  # L^leg_t
 
@@ -1663,7 +1453,7 @@ class LMMSABR:
         w_t           = self.tau * P_sets
         annuity_t     = w_t.sum(axis=2, keepdims=True)
         w_t          /= annuity_t              # (t_valid, n_swaps, n_payments)
-
+        self.w_t = w_t
         #  swap rate
         swap_paths    = (w_t * fwd_subsets).sum(axis=2)
         swap_paths[np.triu_indices_from(swap_paths, k= self.t_to_idx(self.max_swap_expiry-self.min_swap_expiry)+1)] = np.nan
@@ -1683,14 +1473,135 @@ class LMMSABR:
 
         return self.swap_sim, self.W, self.annuity
 
+    def get_sabr_params_imm(self, hed_idx=0, liab_idx=1):
+        # ==========================================================
+        #          Create tensors for the SABR parameters
+        # ==========================================================
+        
+        swap_idxs_0 = self.swap_idxs[0]
+        swap_idxs_1 = self.swap_idxs[1]
+        k_tensor = self.swap_indexer(self.k_mat)[:,[hed_idx, liab_idx]]
+        ggh_tensor = self.ggh_tensor[:,[hed_idx, liab_idx]]
+
+        rho_tensor = self.rho_tensor[:,[hed_idx, liab_idx]]
+        theta_tensor = self.theta_tensor[:,[hed_idx, liab_idx]]
+        phi_tensor = self.phi_tensor[:,[hed_idx, liab_idx]]
+        k_tensor_prod = pairwise_outer(k_tensor)
+        W_tensor_prod = pairwise_outer(self.W[:,[hed_idx, liab_idx]])
+        ttm_mat = self.ttm_mat[np.ix_(swap_idxs_0, swap_idxs_1)][:,[hed_idx, liab_idx]]
+        # ==========================================================
+        # for the m,n,k,l tensor, sum such that we have a m,n tensor
+        
+        # ===========================================================
+        #               compute sigma tensor
+        # ==========================================================
+        #print(f"theta_tensor shape: {theta_tensor.shape}, k_tensor shape: {k_tensor.shape}, rho_tensor shape: {rho_tensor.shape}, W_tensor_prod shape: {W_tensor_prod.shape}, G_tensor shape: {self.G_tensor.shape}")
+        prod = rho_tensor*W_tensor_prod*k_tensor_prod*self.gg_tensor[:,[hed_idx, liab_idx]]
+
+        numerator = np.sum(prod, axis=(2, 3))
+
+        denominator = ttm_mat
+        sigma_sq = np.divide(
+            numerator,
+            denominator,
+            out=np.zeros_like(numerator),  # fill result with 0 where denominator == 0
+            where=denominator != 0
+        )
+        sigma = np.sqrt(sigma_sq)
+
+
+        # ==========================================================
+        #              compute V and Phi tensor       
+        # ==========================================================
+
+        
+
+
+
+        
+        V_terms = rho_tensor*theta_tensor*W_tensor_prod*k_tensor_prod*ggh_tensor
+        self.V_terms = V_terms
+        
+        V_sum = np.sum(V_terms, axis=(2, 3))
+        V_numerator = np.sqrt(2*V_sum)
+        V_denominator = sigma*ttm_mat
+        
+        V = np.divide(
+            V_numerator, 
+            V_denominator,
+            out=np.full_like(V_numerator, np.nan),  # fill result with 0 where denominator == 0
+            where=V_denominator != 0
+        )
+        # print shape of all component tensors
+        #print(f"V_terms shape: {V_terms.shape}, V_sum shape: {V_sum.shape}, V_numerator shape: {V_numerator.shape}, V_denominator shape: {V_denominator.shape}")
+
+        # TODO: ALL TENSORS SHOULD BE SLICED TO HAVE [max_expiry:,...], this removes unnecessary computation
+        omega_tensor = np.divide(V_terms, V_sum[..., None, None], out=np.zeros_like(V_terms), where=V_sum[..., None, None] != 0)
+        
+        phi = np.sum(phi_tensor * omega_tensor, axis=(2, 3))
+        
+        # SWAP INDEX EXPIRY OFFSET
+        swap_hedge_expiry_relative_idx = 0 #self.t_to_idx(self.swap_hedge_expiry_relative)
+        #print(swap_hedge_expiry_relative_idx)
+        swap_liab_expiry_relative_idx = 1 #self.t_to_idx(self.swap_liab_expiry_relative)
+        
+        self.alpha = sigma
+        self.phi = phi
+        self.V = V
+        self.k_tensor_prod = np.sum(k_tensor_prod, axis=(2, 3))
+        self.ggh_tensor_prod = np.sum(ggh_tensor, axis=(2, 3))
+        def risk_metrics(offset):
+            broadcast_tuple = (self.swap_sim.shape[0],self.swap_sim.shape[0])
+            atm_strikes = self.swap_sim[:,offset]#.diagonal(offset=offset)
+            
+            atm_strikes = np.tile(atm_strikes, (self.swap_sim.shape[0],1))
+            
+            # remove upper triangular part of the matrix
+            atm_strikes[np.triu_indices_from(atm_strikes, k=1)] = np.nan
+
+            sigma_ofs = np.broadcast_to(sigma[:, [offset]],broadcast_tuple)
+            
+            V_ofs = np.broadcast_to(V[:, [offset]],broadcast_tuple)
+            phi_ofs = np.broadcast_to(phi[:, [offset]],broadcast_tuple)
+            # swap
+            ttm_mat_ofs = np.broadcast_to(ttm_mat[:, [offset]],broadcast_tuple)
+            annuity_ofs = np.broadcast_to(self.annuity[:, [offset]],broadcast_tuple)
+            # SWAPTION pricing
+            swap_sim_ofs = np.broadcast_to(self.swap_sim[:, [offset]],broadcast_tuple)
+            #print("sigmas")
+            #print(np.max(np.nan_to_num(sigma_ofs)), np.min(np.nan_to_num(sigma_ofs)))
+            iv = self.sabr_implied_vol(F=swap_sim_ofs, K=atm_strikes, T=ttm_mat_ofs, alpha=sigma_ofs, beta=self.beta, rho=phi_ofs, nu=V_ofs)
+            self.iv = iv
+            price, delta, gamma, vega = self.black_swaption_price(F=swap_sim_ofs, K=atm_strikes, T=ttm_mat_ofs, sigma=iv, annuity=annuity_ofs)
+            swaption_pnl = np.zeros_like(price)
+            
+            # Compute safe differences
+            swaption_pnl[1:] = np.subtract(
+                price[1:, :],       # tomorrow's price
+                price[:-1, :],      # today's price
+                out=swaption_pnl[:-1, :],
+                where=~np.isnan(price[1:, :]) & ~np.isnan(price[:-1, :])
+            )
+            # swap metrics
+            swap_sim_single = swap_sim_ofs[:,[0]]
+            annuity_single = annuity_ofs[:,[0]]
+            atm_strikes_single = atm_strikes[:,[0]]
+            swap_value = annuity_single * (swap_sim_single - atm_strikes_single)
+            swap_pnl = np.zeros((len(swap_idxs_0),1))
+            swap_pnl[1:] = swap_value[1:]-swap_value[:-1]
+            return np.stack([price, delta, gamma, vega, swaption_pnl, iv], axis=-1), np.stack([swap_value, swap_pnl, annuity_single, swap_sim_single], axis=-1)
+        
+        hedge_metrics = risk_metrics(swap_hedge_expiry_relative_idx)
+        liab_metrics = risk_metrics(swap_liab_expiry_relative_idx)
+        return hedge_metrics, liab_metrics
 
     def get_sabr_params(self):
         # ==========================================================
         #          Create tensors for the SABR parameters
         # ==========================================================
         
-        swap_idxs_0 = np.arange(self.swap_sim.shape[0])
-        swap_idxs_1 = np.arange(self.swap_sim.shape[1])+self.t_to_idx(self.min_swap_expiry)
+        swap_idxs_0 = self.swap_idxs[0]
+        swap_idxs_1 = self.swap_idxs[1]
         k_tensor = self.swap_indexer(self.k_mat_interp)
 
 
@@ -1706,7 +1617,7 @@ class LMMSABR:
         #               compute sigma tensor
         # ==========================================================
         #print(f"theta_tensor shape: {theta_tensor.shape}, k_tensor shape: {k_tensor.shape}, rho_tensor shape: {rho_tensor.shape}, W_tensor_prod shape: {W_tensor_prod.shape}, G_tensor shape: {self.G_tensor.shape}")
-        prod = rho_tensor*W_tensor_prod*k_tensor_prod*self.G_tensor
+        prod = rho_tensor*W_tensor_prod*k_tensor_prod*self.gg_tensor
 
         numerator = np.sum(prod, axis=(2, 3))
 
@@ -1811,7 +1722,10 @@ class LMMSABR:
 
         return hedge_metrics, liab_metrics
     def sabr_structured_data(self):
-        hedge_metrics_tuple, liab_metrics_tuple = self.get_sabr_params()
+        if self.imm:
+            hedge_metrics_tuple, liab_metrics_tuple = self.get_sabr_params_imm()
+        else:
+            hedge_metrics_tuple, liab_metrics_tuple = self.get_sabr_params()
         # metrics_tuple is (swaption_stack, swap_stack)
 
         def _convert_metrics_to_structured_data(metrics_tuple):
@@ -1967,7 +1881,7 @@ class LMMSABR:
         sigma_all = self.s_mat_interp
         f_all = self.f_sim
         beta = self.beta
-        W_all = self.W
+        W_all = self.w_t
 
         S, J, K = idx_all.shape
         steps = np.arange(S)
@@ -2001,9 +1915,46 @@ class LMMSABR:
 
         return covs_all / diag_covs[:, None]
 
+    def compute_regression_betas_imm(self):
+        # unpack the [T,2,F] swap‐pair array
+        pairs = self.swap_indices[1]    # shape [T, 2, F]
+        i0, i1 = pairs[:,0], pairs[:,1]  # each shape [T, F]
+
+        # instantaneous vols & weights
+        inst_vol   = (self.swap_indexer(self.f_sim**self.beta)
+                    * self.swap_indexer(self.k_mat)
+                    * self.swap_indexer(self.g_mat))
+        inst_vol_w = inst_vol * self.w_t
+
+        # build ρ‐blocks
+        rho_01 = self.rho_mat[i0[...,None], i1[...,None,:]]
+        rho_00 = self.rho_mat[i0[...,None], i0[...,None,:]]
+        rho_11 = self.rho_mat[i1[...,None], i1[...,None,:]]
+
+        # instant cov & vars
+        cov     = np.sum(inst_vol_w[:,0,:,None]
+                    * inst_vol_w[:,1,None,:]
+                    * rho_01,
+                    axis=(1,2))
+
+        var_hed = np.sum(inst_vol_w[:,0,:,None]
+                    * inst_vol_w[:,0,None,:]
+                    * rho_00,
+                    axis=(1,2))
+
+        var_liab= np.sum(inst_vol_w[:,1,:,None]
+                    * inst_vol_w[:,1,None,:]
+                    * rho_11,
+                    axis=(1,2))
+
+        # instantaneous betas
+        beta_hed  = cov / var_hed   # units of swap₁ per unit of swap₀
+        beta_liab = cov / var_liab  # units of swap₀ per unit of swap₁
+        return beta_hed, beta_liab
     
 
     def generate_episodes(
+            
         self,
         n_episodes: int = 1000,
         poisson_rate: float = 1.0,
@@ -2032,6 +1983,124 @@ class LMMSABR:
         save_dtype = np.float32
         shape6 = (T, T, h0_sh.shape[-1])   # = (T, T, 6)
         shape5 = (T, T, h0_sw.shape[-1])   # = (T, T, 5)
+
+        # 2) create timestamped subdirectory
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        base_dir = f"{out_dir}/{timestamp}"
+        timestamped_out_dir = f"{base_dir}_{self.tenor}y_{n_episodes}"
+        Path(timestamped_out_dir).mkdir(parents=True, exist_ok=True)
+
+        # 3) pre-allocate memmap files with float32 dtype
+        total6   = (n_episodes, *shape6)
+        total5   = (n_episodes, *shape5)
+        total_nd = (n_episodes, T, T)
+        total_covs = (n_episodes, T, 2*T)
+
+        mm_h   = np.memmap(f"{timestamped_out_dir}/swaption_hed.dat",   mode="w+", dtype=save_dtype, shape=total6)
+        mm_l   = np.memmap(f"{timestamped_out_dir}/swaption_liab.dat", mode="w+", dtype=save_dtype, shape=total6)
+        mm_hs  = np.memmap(f"{timestamped_out_dir}/swap_hedge.dat",     mode="w+", dtype=save_dtype, shape=total5)
+        mm_ls  = np.memmap(f"{timestamped_out_dir}/swap_liab.dat",      mode="w+", dtype=save_dtype, shape=total5)
+        mm_nd  = np.memmap(f"{timestamped_out_dir}/net_direction.dat",  mode="w+", dtype=save_dtype, shape=total_nd)
+        mm_reg_hed  = np.memmap(f"{timestamped_out_dir}/cov_hed.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
+        mm_reg_liab  = np.memmap(f"{timestamped_out_dir}/cov_liab.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
+
+        # 4) loop over episodes in blocks, with tqdm
+        for start in tqdm(range(0, n_episodes, block),
+                          desc="Generating episode blocks",
+                          unit="block"):
+            b = min(block, n_episodes - start)
+
+            # generate net_direction for this block
+            pd = np.random.poisson(lam=poisson_rate, size=(b, T))[:, None, :]
+            num_pos = np.random.binomial(pd, 0.5)
+            nd_block = 2 * num_pos - pd
+            iu = np.triu_indices(T, k=1)
+            nd_block = np.tile(nd_block, (1, T, 1))
+            nd_block[:, iu[0], iu[1]] = 0
+            nd_block = np.nan_to_num(nd_block).astype(save_dtype)
+
+            # prepare in‑RAM buffers as float32
+            hd_b = np.empty((b, *shape6), dtype=save_dtype)
+            ld_b = np.empty((b, *shape6), dtype=save_dtype)
+            hs_b = np.empty((b, *shape5), dtype=save_dtype)
+            ls_b = np.empty((b, *shape5), dtype=save_dtype)
+            reg_hed_b = np.empty((b, T,2*T), dtype=save_dtype)
+            reg_liab_b = np.empty((b, T,2*T), dtype=save_dtype)
+
+            # fill buffers
+            for i in range(b):
+                ep_idx = start + i
+                self.simulate(seed=ep_idx, sub_steps = sub_step)
+                self.get_swap_matrix()
+                (h_sh, h_sw), (l_sh, l_sw) = self.get_sabr_params()
+                self.compute_regression_betas()
+                hd_b[i] = np.nan_to_num(h_sh).astype(save_dtype)
+                ld_b[i] = np.nan_to_num(l_sh).astype(save_dtype)
+                hs_b[i] = np.nan_to_num(h_sw).astype(save_dtype)
+                ls_b[i] = np.nan_to_num(l_sw).astype(save_dtype)
+                reg_hed_b[i] = np.nan_to_num(self.compute_regression_betas())
+                reg_liab_b[i] = np.nan_to_num(self.compute_regression_betas(offset=T))
+
+
+            # write and flush this block
+            mm_h        [start:start+b] = hd_b
+            mm_l        [start:start+b] = ld_b
+            mm_hs       [start:start+b] = hs_b
+            mm_ls       [start:start+b] = ls_b
+            mm_nd       [start:start+b] = nd_block
+            mm_reg_hed  [start:start+b] = reg_hed_b
+            mm_reg_liab [start:start+b] = reg_liab_b
+
+            mm_h .flush()
+            mm_l .flush()
+            mm_hs.flush()
+            mm_ls.flush()
+            mm_nd.flush()
+            mm_reg_hed.flush()
+            mm_reg_liab.flush()
+
+        # 5) pickle the LMMModel state for later reuse
+        pickle_path = Path(timestamped_out_dir) / "lmm_samples.pkl"
+        with open(pickle_path, "wb") as f:
+            cloudpickle.dump(self, f)
+
+        print(f"All episodes streamed to disk in '{timestamped_out_dir}'.")
+        print(f"LMMM samples list of dicts saved to '{pickle_path}'.")
+        return timestamped_out_dir
+    
+
+
+
+
+    def generate_episodes_imm(
+        self,
+        n_episodes: int = 1000,
+        poisson_rate: float = 1.0,
+        block: int = 1000,
+        out_dir: str = "data/swaption_memmap"
+    ) -> str:
+        """
+        Stream-generate `n_episodes` into five .dat files under `out_dir`,
+        ensuring all data is saved as float32, with a tqdm progress bar and
+        a final pickle of the model.
+        """
+        if self.dt < 1/100:
+            print("USING ONLY 1 SUBSTEP AS dt < 1/100")
+            sub_step = 1 # no sub steps since we already have a fine resolution for the euler step
+        # prepare output directory
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        assert self.primed, "You must call prime() before generating episodes."
+        #assert len(self.df_init_list) > 10, "you need a diverse set of starting curves"
+        # 1) sample one episode to get per-episode shapes
+        self.simulate(seed=0)
+        self.get_swap_matrix()
+        (h0_sh, h0_sw), (l0_sh, l0_sw) = self.get_sabr_params_imm()
+        T = self.swap_sim_shape[0]
+
+        # Force saving dtype to float32
+        save_dtype = np.float32
+        shape6 = (T, T, h0_sh.shape[-1])   # = (T, T, 6)
+        shape5 = (T, 1, h0_sw.shape[-1])   # = (T, 1, 5)
 
         # 2) create timestamped subdirectory
         timestamp = time.strftime("%Y%m%d-%H%M%S")
