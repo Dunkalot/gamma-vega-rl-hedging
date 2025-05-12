@@ -696,7 +696,7 @@ class GammaHedgeAgent(core.Actor):
 
         #alpha = (hed_share - low_val)/(high_val - low_val)
         
-        return np.array([1])
+        return np.array([self.hedge_ratio])
 
     def observe_first(self, timestep: dm_env.TimeStep):
         pass

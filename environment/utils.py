@@ -29,7 +29,8 @@ class Utils:
         
         self.seed = seed
 
-        self.out_dir = "data/minimal"
+        self.out_dir = "data/stress"
+        test_episode_offset = 0
         self.test_episode_offset = test_episode_offset
         self.test = test
         
@@ -38,7 +39,7 @@ class Utils:
         print(f"\nMemory usage before lmm: {psutil.Process().memory_info().rss / 1e6:.2f} MB")
 
         
-        self.lmm:LMMSABR = LMMSABR(tenor=1, resolution=63, tau=0.25, sim_time=30/252, swap_client_expiry=60/252, swap_hedge_expiry=30/252)
+        self.lmm:LMMSABR = LMMSABR(imm=True,tenor=5, resolution=126, tau=0.25,sim_time=0.25, swap_client_expiry=0.5, swap_hedge_expiry=0.25)
         self.contract_size = np.float32(100)
         print("!!!! CONTRACT SIZE IS ", self.contract_size)
         print(f"\nXXXXXXXXXXXXXXXXXXXXXX\n The spread is {spread}   \n nXXXXXXXXXXXXXXXXXXXXXX")
@@ -102,12 +103,12 @@ class Utils:
         hedge_swap_mm = np.memmap(
             os.path.join(data_dir, 'swap_hedge.dat'),
             dtype=np.float32, mode='r',
-            shape=(n_episodes, T1, T2, swap_dims)
+            shape=(n_episodes, T1, 1, swap_dims)
         )
         liab_swap_mm = np.memmap(
             os.path.join(data_dir, 'swap_liab.dat'),
             dtype=np.float32, mode='r',
-            shape=(n_episodes, T1, T2, swap_dims)
+            shape=(n_episodes, T1, 1, swap_dims)
         )
         net_direction_mm = np.memmap(
             os.path.join(data_dir, 'net_direction.dat'),
@@ -117,12 +118,12 @@ class Utils:
         cov_hed = np.memmap(
             os.path.join(data_dir, 'cov_hed.dat'),
             dtype=np.float32, mode='r',
-            shape=(n_episodes, T1, T2*2)
+            shape=(n_episodes, T1, 1)
         )
         cov_liab = np.memmap(
             os.path.join(data_dir, 'cov_liab.dat'),
             dtype=np.float32, mode='r',
-            shape=(n_episodes, T1, T2*2)
+            shape=(n_episodes, T1, 1)
         )
 
         # make ttm_mat 

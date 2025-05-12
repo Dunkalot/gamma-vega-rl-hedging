@@ -1950,7 +1950,7 @@ class LMMSABR:
         # instantaneous betas
         beta_hed  = cov / var_hed   # units of swap₁ per unit of swap₀
         beta_liab = cov / var_liab  # units of swap₀ per unit of swap₁
-        return beta_hed, beta_liab
+        return beta_hed[:,None], beta_liab[:,None]
     
 
     def generate_episodes(
@@ -2084,9 +2084,6 @@ class LMMSABR:
         ensuring all data is saved as float32, with a tqdm progress bar and
         a final pickle of the model.
         """
-        if self.dt < 1/100:
-            print("USING ONLY 1 SUBSTEP AS dt < 1/100")
-            sub_step = 1 # no sub steps since we already have a fine resolution for the euler step
         # prepare output directory
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         assert self.primed, "You must call prime() before generating episodes."
@@ -2112,7 +2109,7 @@ class LMMSABR:
         total6   = (n_episodes, *shape6)
         total5   = (n_episodes, *shape5)
         total_nd = (n_episodes, T, T)
-        total_covs = (n_episodes, T, 2*T)
+        total_covs = (n_episodes, T, 2)
 
         mm_h   = np.memmap(f"{timestamped_out_dir}/swaption_hed.dat",   mode="w+", dtype=save_dtype, shape=total6)
         mm_l   = np.memmap(f"{timestamped_out_dir}/swaption_liab.dat", mode="w+", dtype=save_dtype, shape=total6)
@@ -2142,22 +2139,23 @@ class LMMSABR:
             ld_b = np.empty((b, *shape6), dtype=save_dtype)
             hs_b = np.empty((b, *shape5), dtype=save_dtype)
             ls_b = np.empty((b, *shape5), dtype=save_dtype)
-            reg_hed_b = np.empty((b, T,2*T), dtype=save_dtype)
-            reg_liab_b = np.empty((b, T,2*T), dtype=save_dtype)
+            reg_hed_b = np.empty((b, T,1), dtype=save_dtype)
+            reg_liab_b = np.empty((b, T,1), dtype=save_dtype)
 
             # fill buffers
             for i in range(b):
                 ep_idx = start + i
-                self.simulate(seed=ep_idx, sub_steps = sub_step)
+                self.simulate(seed=ep_idx)
                 self.get_swap_matrix()
-                (h_sh, h_sw), (l_sh, l_sw) = self.get_sabr_params()
-                self.compute_regression_betas()
+                (h_sh, h_sw), (l_sh, l_sw) = self.get_sabr_params_imm()
+                
+                reg_hed, reg_liab = self.compute_regression_betas_imm()
                 hd_b[i] = np.nan_to_num(h_sh).astype(save_dtype)
                 ld_b[i] = np.nan_to_num(l_sh).astype(save_dtype)
                 hs_b[i] = np.nan_to_num(h_sw).astype(save_dtype)
                 ls_b[i] = np.nan_to_num(l_sw).astype(save_dtype)
-                reg_hed_b[i] = np.nan_to_num(self.compute_regression_betas())
-                reg_liab_b[i] = np.nan_to_num(self.compute_regression_betas(offset=T))
+                reg_hed_b[i] = np.nan_to_num(reg_hed)
+                reg_liab_b[i] = np.nan_to_num(reg_liab)
 
 
             # write and flush this block

@@ -91,14 +91,13 @@ def make_loggers(work_folder):
         learner=make_logger(work_folder, 'learner')
     )
 
-def make_environment(utils,log_bef=None, log_af=None, logger = None, test=False) -> dm_env.Environment:
+def make_environment(utils,log_bef=None, log_af=None, logger = None) -> dm_env.Environment:
     # Make sure the environment obeys the dm_env.Environment interface.
     environment = wrappers.GymWrapper(TradingEnv(
     utils=utils,
     log_bef=log_bef,
     log_af=log_af,
-    logger=logger,
-    test=test))
+    logger=logger))
     # Clip the action returned by the agent to the environment spec.
     #environment = wrappers.CanonicalSpecWrapper(environment, clip=False) # no need for scaling output
     environment = wrappers.SinglePrecisionWrapper(environment)
@@ -224,10 +223,10 @@ def make_networks(
 
 def make_quantile_networks(
     action_spec: specs.BoundedArray,
-    #policy_layer_sizes: Sequence[int] = (256, 256, 256), # (64, 64)
-    policy_layer_sizes: Sequence[int] = (64, 64, 64),
-    #critic_layer_sizes: Sequence[int] =  (512, 512, 256),
-    critic_layer_sizes: Sequence[int] =  (64, 64, 64),
+    policy_layer_sizes: Sequence[int] = (256, 256, 256), # (64, 64)
+    #policy_layer_sizes: Sequence[int] = (32, 32),
+    critic_layer_sizes: Sequence[int] =  (512, 512, 256),
+    #critic_layer_sizes: Sequence[int] =  (64, 64),
     quantile_interval: float = 0.01, 
     ) -> Mapping[str, types.TensorTransformation]:
     """Creates the networks used by the agent."""
@@ -403,7 +402,7 @@ def main(argv):
         critic_network=agent_networks['critic'],
         observation_network=agent_networks['observation'],
         n_step=FLAGS.n_step,
-        discount=0.99,
+        discount=0.98,
         sigma=0.3,  # pytype: disable=wrong-arg-types
         checkpoint=False,
         logger=loggers['learner'],
@@ -443,13 +442,13 @@ def main(argv):
     # Create the evaluation actor and loop.
     eval_actor = actors.FeedForwardActor(policy_network=eval_policy)
   
-    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread)
+    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread, test=True)
     #eval_utils.vol_kernel = agent._learner._target_observation_network.vol_kernel
     #eval_utils.volvol_kernel = agent._learner._target_observation_network.volvol_kernel
     eva_logfunc = EvalLog()
     eval_log_bef = eva_logfunc._log_before
     eval_log_af = eva_logfunc._log_after
-    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'),test=True)
+    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))
     eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])
     eval_loop.run(num_episodes=FLAGS.eval_sim)   
     print("Successfully finished.")

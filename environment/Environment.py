@@ -83,7 +83,7 @@ class TradingEnv(gym.Env):
 
     # trade_freq in unit of day, e.g 2: every 2 day; 0.5 twice a day;
     def __init__(self, utils, log_bef=None, log_af=None, logger: Optional[loggers.Logger] = None):
-        self.actions = np.zeros(utils.swap_shape[0])#*np.nan
+        self.actions = np.zeros(utils.swap_shape[0]*20)#*np.nan
         super(TradingEnv, self).__init__()
         self.log_bef = log_bef
         self.log_af = log_af 
@@ -131,8 +131,21 @@ class TradingEnv(gym.Env):
         self.print_nanwarning = True
         #print("episode reset!", self.sim_episode)
         if self.sim_episode%20 == 0:
-            print(np.nanmean(self.actions), np.nanmin(self.actions), np.nanmax(self.actions))
-        self.actions = self.actions * np.nan
+
+            a = self.actions
+            p1, p5, p50, p95, p99 = np.nanpercentile(a, [1, 5, 50, 95, 99])
+            mean, std, min_val, max_val = np.nanmean(a), np.nanstd(a), np.nanmin(a), np.nanmax(a)
+            eps = 1e-6
+            frac_clipped_min = np.sum(a <= -1+eps) / a.size
+            frac_clipped_max = np.sum(a >=  1-eps) / a.size
+            
+            print(f"Action stats - Mean: {mean:.4f}, Std: {std:.4f}")
+            print(f"Min: {min_val:.4f}, Max: {max_val:.4f}")
+            print(f"Percentiles - p1: {p1:.4f}, p5: {p5:.4f}, p50: {p50:.4f}, p95: {p95:.4f}, p99: {p99:.4f}")
+            print(f"Clipped values - Min: {frac_clipped_min:.4f} ({frac_clipped_min*100:.1f}%), Max: {frac_clipped_max:.4f} ({frac_clipped_max*100:.1f}%)")
+            
+            self.actions = self.actions * np.nan
+
         return self.portfolio.get_state(self.t)
     
 
