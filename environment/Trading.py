@@ -429,14 +429,18 @@ class MainPortfolio(AssetInterface):
 
     def solve_2x2_numba(self,a, b, c, d, e, f):
         det = a*d - b*c
-        # optionally handle det == 0   
-        #print(a,b,c,d,e,f, det)
+        # Safety check for near-zero determinant
+        if abs(det) < 1e-10:
+            # Return zero actions as a fallback
+            return 0.0, 0.0
+        
         return ( ( e*d - b*f ) / det,
                 ( a*f - e*c ) / det )
+            
     def solve_delta_action(self, t):
         delta_unit_hed  = self.underlying.active_path_hed[t, 0, SwapKeys.DELTA] * self.utils.contract_size
         delta_unit_liab = self.underlying.active_path_liab[t, 0, SwapKeys.DELTA] * self.utils.contract_size
-        #print(delta_unit_hed, delta_unit_liab)
+        
         # Store results of expensive/repeated calls
         k_coef_hed = self.kernel_coef_hed(t)
         k_coef_liab = self.kernel_coef_liab(t)
@@ -446,15 +450,19 @@ class MainPortfolio(AssetInterface):
         k21_raw = k_coef_liab[0]
         
         # Use stored results to compute local deltas
-        # This replaces implicit calls within self.get_delta_local_hed(t) and self.get_delta_local_liab(t)
         delta_local_hed = np.inner(k_coef_hed, current_delta_vec)
         delta_local_liab = np.inner(k_coef_liab, current_delta_vec)
-        action_swap_hed_delta, action_swap_liab_delta = self.solve_2x2_numba(1.,k12_raw, k21_raw,1., delta_local_hed, delta_local_liab)
+        
+        # Solve the 2x2 system to find hedge positions that will neutralize delta exposures
+        action_swap_hed_delta, action_swap_liab_delta = self.solve_2x2_numba(
+            1., k12_raw, k21_raw, 1., delta_local_hed, delta_local_liab
+        )
 
         action_swap_hed = -action_swap_hed_delta / delta_unit_hed
         action_swap_liab = -action_swap_liab_delta / delta_unit_liab
         
         return action_swap_hed, action_swap_liab
+
     def step(self, action_swaption_hed, t: int, result):
         """Apply actions, compute PnL and reward at time t."""
         
