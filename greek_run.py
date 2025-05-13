@@ -76,7 +76,7 @@ def make_environment(utils,log_bef=None, log_af=None, logger = None) -> dm_env.E
 def main(argv):
     gamma_hedge_ratio = 1.0
     
-    work_folder = f'greekhedge_spread={FLAGS.spread}/stress/{FLAGS.strategy}'
+    work_folder = f'greekhedge_spread={FLAGS.spread}/test/{FLAGS.strategy}'
     if FLAGS.logger_prefix:
         work_folder = FLAGS.logger_prefix + "/" + work_folder
     # Create an environment, grab the spec, and use it to create networks.

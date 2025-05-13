@@ -30,7 +30,7 @@ class Utils:
         self.seed = seed
 
         self.out_dir = "data/stress"
-        test_episode_offset = 0
+        #test_episode_offset = 0
         self.test_episode_offset = test_episode_offset
         self.test = test
         
@@ -39,7 +39,8 @@ class Utils:
         print(f"\nMemory usage before lmm: {psutil.Process().memory_info().rss / 1e6:.2f} MB")
 
         
-        self.lmm:LMMSABR = LMMSABR(imm=True,tenor=5, resolution=126, tau=0.25,sim_time=0.25, swap_client_expiry=0.5, swap_hedge_expiry=0.25)
+        self.lmm:LMMSABR = LMMSABR(imm=True,tenor=5, resolution=126, tau=0.5,sim_time=0.25, swap_client_expiry=1, swap_hedge_expiry=2)
+        #LMMSABR(imm=True,tenor=5, resolution=126, tau=0.25,sim_time=0.25, swap_client_expiry=0.5, swap_hedge_expiry=0.25)
         self.contract_size = np.float32(100)
         print("!!!! CONTRACT SIZE IS ", self.contract_size)
         print(f"\nXXXXXXXXXXXXXXXXXXXXXX\n The spread is {spread}   \n nXXXXXXXXXXXXXXXXXXXXXX")
@@ -60,24 +61,8 @@ class Utils:
     def generate_swaption_market_data(self):
         """
         Load swaption market episodes from disk directory `out_dir`.
-
-        Assumes files named:
-        - swaption_hed.dat   -> shape (n_episodes, T, T, hed_greeks)
-        - swaption_liab.dat  -> same as above
-        - swap_hedge.dat     -> shape (n_episodes, T, T, swap_dims)
-        - swap_liab.dat      -> same as above
-        - net_direction.dat  -> shape (n_episodes, T, T)
-
-        Args:
-            out_dir (str): path containing the .dat files or timestamped subdir.
-            n_episodes (int): number of episodes.
-            swap_shape (tuple): (T, T) shape of time/time.
-            hed_greeks (int): number of greeks in swaption data (e.g. 6).
-            swap_dims (int): number of dims in swap data (e.g. 5).
-        Returns:
-            tuple[np.memmap]: (hedge_swaption_mm, liab_swaption_mm,
-                                hedge_swap_mm,   liab_swap_mm,
-                                net_direction_mm)
+        
+        Returns only data relevant to our simplified model (hedge swap only).
         """
         out_dir = self.out_dir
         n_episodes = self.n_episodes
@@ -105,6 +90,8 @@ class Utils:
             dtype=np.float32, mode='r',
             shape=(n_episodes, T1, 1, swap_dims)
         )
+        # Still load liability swap data to maintain compatibility with existing code,
+        # but we won't use it in the simplified model
         liab_swap_mm = np.memmap(
             os.path.join(data_dir, 'swap_liab.dat'),
             dtype=np.float32, mode='r',
@@ -128,17 +115,15 @@ class Utils:
 
         # make ttm_mat 
         ttm_mat = self.lmm.ttm_mat[np.ix_(self.lmm.swap_idxs[0],self.lmm.swap_idxs[1])].copy()
-        ttm_mat[np.triu_indices_from(ttm_mat,k=53)] = 0
-
+        
 
         return (
             hedge_swaption_mm,
             liab_swaption_mm,
             hedge_swap_mm,
-            liab_swap_mm,
             net_direction_mm,
             cov_hed,
             cov_liab,
-            ttm_mat
+            ttm_mat[:,[0]]
         )
-        
+

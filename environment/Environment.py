@@ -27,21 +27,16 @@ class StepResult:
     #action_swap_liab: float = 0.0
     #action_swap_hed_mag: float = 0.0
     #action_swap_liab_mag: float = 0.0
-
+    swap_rate: float = 0.0
     cost_swaption_hed: float = 0.0
     cost_swap_hed: float = 0.0
-    cost_swap_liab: float = 0.0
-    cost_ratio: float = 0.0
     step_pnl: float = 0.0
     step_pnl_hed_swaption: float = 0.0
     step_pnl_liab_swaption: float = 0.0
     step_pnl_hed_swap: float = 0.0
-    step_pnl_liab_swap: float = 0.0
 
     delta_local_hed_before: float = 0.0
     delta_local_hed_after: float = 0.0
-    delta_local_liab_before: float = 0.0
-    delta_local_liab_after: float = 0.0
     delta_before: float = 0.0
     delta_after: float = 0.0
 
@@ -52,9 +47,16 @@ class StepResult:
 
     action_gamma: float = 0.0
     #action_vega: float = 0.0
-    gamma_ratio: float = 0.0
     #vega_ratio: float = 0.0
-
+    
+    # State fields
+    rate_norm: float = 0.0
+    hed_cost_norm: float = 0.0
+    gamma_unit_norm: float = 0.0
+    vega_unit_norm: float = 0.0
+    gamma_ratio: float = 0.0
+    iv_norm: float = 0.0
+    ttm: float = 0.0
 
 class TrainLog:
     @staticmethod
@@ -67,12 +69,12 @@ class EvalLog:
     @staticmethod
     def _log_before(self, result,t):
         
-            result.gamma_before,  result.delta_local_hed_before, result.delta_local_liab_before = self.portfolio.get_kernel_greek_risk(t)
+            result.gamma_before,  result.delta_local_hed_before = self.portfolio.get_kernel_greek_risk(t)
             result.delta_before = self.portfolio.get_delta(self.t)
     @staticmethod
     def _log_after(self, result,t):
 
-        result.gamma_after, result.delta_local_hed_after, result.delta_local_liab_after = self.portfolio.get_kernel_greek_risk(t)
+        result.gamma_after, result.delta_local_hed_after = self.portfolio.get_kernel_greek_risk(t)
         result.delta_after = self.portfolio.get_delta(self.t) # portfolio delta
         self.logger.write(dataclasses.asdict(result))
 
@@ -101,6 +103,7 @@ class TradingEnv(gym.Env):
         self.num_path   = len(hedge_mm)
         # number of steps per episode inferred from memmap shape
         self.num_period = hedge_mm.shape[1]
+        print(self.num_period)
         self.sim_episode = -1 + (utils.test_episode_offset if utils.test else 0)
         print(f"episode offset {self.sim_episode}")
         self.t = None
@@ -115,7 +118,7 @@ class TradingEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf,    
             high=+np.inf,
-            shape=(6,),
+            shape=(7,),
             dtype=np.float32
         )
 
@@ -165,9 +168,6 @@ class TradingEnv(gym.Env):
         
 
         assert not np.isnan(action).any(), action
-        #if self.print_nanwarning and np.isnan(action).any():
-        #    self.print_nanwarning = False
-        #    print(f"action is NaN! This warning is turned off until next episode")
         
         #if self.logger: # dont waste resources
         self.log_bef(self,result,t) 
@@ -177,17 +177,18 @@ class TradingEnv(gym.Env):
             result=result,
         )
 
-        self.log_af(self,result,t)
             
         self.t = self.t + 1
 
         state = self.portfolio.get_state(self.t)
+        result.rate_norm, result.hed_cost_norm, result.vega_unit_norm, result.gamma_ratio, result.gamma_unit_norm, result.iv_norm, result.ttm = state
         if self.t == self.num_period-1:
             done = True
-            state[[2,3,4]] = 0 # all greeks to 0
+            state[[2,3,4,5]] = 0 # all greeks to 0
         else:
             done = False
         
+        self.log_af(self,result,t)
 
         info = {"path_row": self.sim_episode}
         return state, reward, done, info

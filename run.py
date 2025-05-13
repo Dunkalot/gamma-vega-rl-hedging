@@ -68,9 +68,34 @@ flags.DEFINE_boolean('vega_obs', False, 'Include portfolio vega and hedging opti
 flags.DEFINE_integer('eval_seed', 1234, 'Evaluation Seed (Default 1234)')
 flags.DEFINE_boolean('gbm', False, 'GBM (Default False)')
 flags.DEFINE_boolean('sabr', False, 'SABR (Default False)')
+flags.DEFINE_boolean('specific_folder', False, 'override the manual timestamped folder generation')
+flags.DEFINE_string('run_id', '', 'Specific run ID (timestamp) to load for evaluation (Default: create new timestamp)')
+flags.DEFINE_string('runs_registry', './logs/runs_registry.csv', 'Path to the registry file that tracks all runs')
 
+# Create or use specified run folder
 TS = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_FOLDER = f"/run_{TS}"
+if FLAGS.eval_only and FLAGS.run_id:
+    RUN_FOLDER = f"/run_{FLAGS.run_id}"
+    print(f"Evaluation mode: Using existing run folder {RUN_FOLDER}")
+else:
+    RUN_FOLDER = f"/run_{TS}"
+    print(f"Creating new run folder {RUN_FOLDER}")
+    
+    # Record this run in the registry
+    os.makedirs(os.path.dirname(FLAGS.runs_registry), exist_ok=True)
+    registry_exists = os.path.exists(FLAGS.runs_registry)
+    
+    with open(FLAGS.runs_registry, 'a') as f:
+        if not registry_exists:
+            f.write("timestamp,description,work_folder,obj_func,critic,eval_only\n")
+        
+        # Extract work_folder pattern that will be used
+        folder_pattern = f'spread={FLAGS.spread}_obj={FLAGS.obj_func}_threshold={FLAGS.threshold}_critic={FLAGS.critic}_v={FLAGS.vov}_hedttm={FLAGS.hed_ttm}'
+        if FLAGS.logger_prefix:
+            folder_pattern = f"{FLAGS.logger_prefix}/{folder_pattern}"
+            
+        f.write(f"{TS},{FLAGS.logger_prefix},{folder_pattern},{FLAGS.obj_func},{FLAGS.critic},{FLAGS.eval_only}\n")
+
 def make_logger(work_folder, label, terminal=False):
     
     loggers = [
@@ -359,12 +384,39 @@ def load_agent(policy_network, observation_network, checkpoint_folder):
         var.assign(
             trainable_variables_snapshot[var_name_wo_name_scope])
 
-def main(argv):
+def list_available_runs():
+    """Print a list of available runs from the registry."""
+    if not os.path.exists(FLAGS.runs_registry):
+        print("No runs registry found. Run training first to create some models.")
+        return
+        
+    print("\nAvailable Runs:")
+    print("-" * 80)
+    print(f"{'Timestamp':<15} | {'Description':<20} | {'Objective':<10} | {'Critic':<10}")
+    print("-" * 80)
     
-    if FLAGS.per == True:
-      from agent_per.agent_per import D4PG
-    else:
-      from agent.agent import D4PG
+    with open(FLAGS.runs_registry, 'r') as f:
+        # Skip header
+        next(f)
+        for line in f:
+            parts = line.strip().split(',')
+            if len(parts) >= 5:  # Make sure we have enough columns
+                ts, desc, _, obj, critic = parts[:5]
+                print(f"{ts:<15} | {desc:<20} | {obj:<10} | {critic:<10}")
+    
+    print("\nTo evaluate a specific run, use: --eval_only=True --run_id=TIMESTAMP")
+    print("-" * 80)
+
+def main(argv):
+    # Show available runs if requested
+    if FLAGS.eval_only and not FLAGS.run_id and not FLAGS.agent_path:
+        list_available_runs()
+        print("Please specify a run_id to evaluate.")
+        return
+
+    
+    
+    from agent.agent import D4PG
 
     # work_folder = f'spread={FLAGS.spread}_obj={FLAGS.obj_func}_threshold={FLAGS.threshold}_critic={FLAGS.critic}_v={FLAGS.vov}_hedttm={FLAGS.hed_ttm}_elastic_reward_k={FLAGS.elastic_reward_k}'
     work_folder = f'spread={FLAGS.spread}_obj={FLAGS.obj_func}_threshold={FLAGS.threshold}_critic={FLAGS.critic}_v={FLAGS.vov}_hedttm={FLAGS.hed_ttm}'
@@ -419,40 +471,77 @@ def main(argv):
         train_loop = acme.EnvironmentLoop(environment, agent, label='train_loop', logger=loggers['train_loop'])
         train_loop.run(num_episodes=FLAGS.train_sim)
         save_agent(agent._learner._policy_network, agent._learner._observation_network, f'./logs/{RUN_FOLDER}/{work_folder}')
-
-    # Create the evaluation policy.
-    if FLAGS.eval_only:
+        threshold=FLAGS.threshold,
+    # Create the evaluation policy.ic,
+    if FLAGS.eval_only:c=environment_spec,
         policy_net = agent._learner._policy_network
         observation_net = agent._learner._observation_network
-        if FLAGS.agent_path == '':
-            load_agent(policy_net, observation_net, f'./logs/{RUN_FOLDER}/{work_folder}')
+        networks['observation'],
+        # Determine which path to load from
+        if FLAGS.agent_path:unt=0.98,
+            # Use explicitly provided agent path
+            load_path = FLAGS.agent_path
+            print(f"Loading agent from explicit path: {load_path}")
+        elif FLAGS.run_id:S.batch_size,
+            # Construct path from run_id and work_folderlicy_optimizer=snt.optimizers.Adam(1e-4),
+            load_path = f'./logs/run_{FLAGS.run_id}/{work_folder}'ritic_optimizer=snt.optimizers.Adam(1e-4),
+            print(f"Loading agent from run_id path: {load_path}")
         else:
-            load_agent(policy_net, observation_net, FLAGS.agent_path)
-        eval_policy = snt.Sequential([
-            agent_networks['observation'],
-            policy_net,
-        ])
+            # Default to current run folder (backward compatibility)r._observation_network.vol_kernel
+            load_path = f'./logs/{RUN_FOLDER}/{work_folder}'.volvol_kernel = agent._learner._observation_network.volvol_kernel
+            print(f"Loading agent from current run folder: {load_path}")    
+            p used for training.
+        load_agent(policy_net, observation_net, load_path)
+        'train_loop', logger=loggers['train_loop'])
+        eval_policy = snt.Sequential([      train_loop.run(num_episodes=FLAGS.train_sim)
+            agent_networks['observation'],./logs/{RUN_FOLDER}/{work_folder}')n(main)if __name__ == '__main__':    Path(f'./logs/{RUN_FOLDER}/{work_folder}/ok').touch()    print("Successfully finished.")    eval_loop.run(num_episodes=FLAGS.eval_sim)       eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))    eval_log_af = eva_logfunc._log_after    eval_log_bef = eva_logfunc._log_before    eva_logfunc = EvalLog()    #eval_utils.volvol_kernel = agent._learner._target_observation_network.volvol_kernel        eval_policy = snt.Sequential([
+            policy_net,            agent_networks['observation'],
+        ])cy'],
     else:
-        eval_policy = snt.Sequential([
-            agent_networks['observation'],
+        eval_policy = snt.Sequential([y_network
+            agent_networks['observation'],._observation_network  print("Starting evaluation")
             agent_networks['policy'],
         ])
 
-    print("Starting evaluation")
-    # Create the evaluation actor and loop.
-    eval_actor = actors.FeedForwardActor(policy_network=eval_policy)
+    print("Starting evaluation")observation_net, FLAGS.agent_path)isodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread, test=True)
+    # Create the evaluation actor and loop.r._target_observation_network.vol_kernel
+    eval_actor = actors.FeedForwardActor(policy_network=eval_policy)            agent_networks['observation'],earner._target_observation_network.volvol_kernel
   
     eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread, test=True)
-    #eval_utils.vol_kernel = agent._learner._target_observation_network.vol_kernel
-    #eval_utils.volvol_kernel = agent._learner._target_observation_network.volvol_kernel
-    eva_logfunc = EvalLog()
-    eval_log_bef = eva_logfunc._log_before
-    eval_log_af = eva_logfunc._log_after
-    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))
-    eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])
+    #eval_utils.vol_kernel = agent._learner._target_observation_network.vol_kernel    else:
+ls=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))
+, label='eval_loop', logger=loggers['eval_loop'])
     eval_loop.run(num_episodes=FLAGS.eval_sim)   
-    print("Successfully finished.")
-    Path(f'./logs/{RUN_FOLDER}/{work_folder}/ok').touch()
+nished.")
+/{RUN_FOLDER}/{work_folder}/ok').touch()
 
-if __name__ == '__main__':
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    app.run(main)if __name__ == '__main__':    Path(f'./logs/{RUN_FOLDER}/{work_folder}/ok').touch()    print("Successfully finished.")    eval_loop.run(num_episodes=FLAGS.eval_sim)       eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))    eval_log_af = eva_logfunc._log_after    eval_log_bef = eva_logfunc._log_before    eva_logfunc = EvalLog()    #eval_utils.volvol_kernel = agent._learner._target_observation_network.volvol_kernel    #eval_utils.vol_kernel = agent._learner._target_observation_network.vol_kernel    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread, test=True)      eval_actor = actors.FeedForwardActor(policy_network=eval_policy)    # Create the evaluation actor and loop.    print("Starting evaluation")        ])            agent_networks['policy'],            agent_networks['observation'],    Path(f'./logs/{RUN_FOLDER}/{work_folder}/ok').touch()    print("Successfully finished.")    eval_loop.run(num_episodes=FLAGS.eval_sim)       eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))    eval_log_af = eva_logfunc._log_after    eval_log_bef = eva_logfunc._log_before    eva_logfunc = EvalLog()    #eval_utils.volvol_kernel = agent._learner._target_observation_network.volvol_kernel        eval_policy = snt.Sequential([if __name__ == '__main__':
     app.run(main)
