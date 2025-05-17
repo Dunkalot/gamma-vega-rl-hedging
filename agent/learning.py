@@ -127,15 +127,9 @@ class D4PGLearner(acme.Learner):
         self._iterator = dataset_iterator
 
         # Create optimizers if they aren't given.
-        self._critic_optimizer = critic_optimizer or snt.optimizers.Adam(1e-4)
-        self._policy_optimizer = policy_optimizer or snt.optimizers.Adam(1e-4)
-        # in D4PGLearner.__init__ (after reading initial_a, decay_steps, end_a, power)
-        self._anneal_schedule = tf.keras.optimizers.schedules.PolynomialDecay(
-            initial_learning_rate=1.0,
-            decay_steps=annealer_steps,
-            end_learning_rate=0.01,
-            power=1.0
-        )
+        self._critic_optimizer = critic_optimizer or snt.optimizers.Adam(self._anneal_schedule)
+        self._policy_optimizer = policy_optimizer or snt.optimizers.Adam(self._anneal_schedule)
+ 
 
 
         # Expose the variables.
@@ -207,9 +201,6 @@ class D4PGLearner(acme.Learner):
 
         # Cast the additional discount to match the environment discount dtype.
         discount = tf.cast(self._discount, dtype=transitions.discount.dtype)
-        a = tf.cast(self._anneal_schedule(self._num_steps), dtype=tf.float32)
-        self._policy_network.set_temperature(a)
-        self._target_policy_network.set_temperature(a)
         #tf.print("updating a",a,self._num_steps)
         with tf.GradientTape(persistent=True) as tape:
             # Maybe transform the observation before feeding into policy and critic.

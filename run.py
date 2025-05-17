@@ -20,8 +20,7 @@ import pandas as pd
 from environment.Environment import TradingEnv, TrainLog, EvalLog
 from environment.utils import Utils
 import agent.distributional as ad
-from agent.agent import KernelLayer, PolicyWithHedge, ObservationWithKernel
-
+from agent.agent import D4PG
 from absl import app
 from absl import flags
 from collections import OrderedDict
@@ -37,69 +36,38 @@ tf.keras.backend.set_floatx('float32')
 tf.keras.mixed_precision.set_global_policy("mixed_float16")
 
 FLAGS = flags.FLAGS
+flags.DEFINE_float('spread_train', 0.0, 'Hedging transaction cost (Default 0.0)')
+flags.DEFINE_float('spread_eval', 0.0, 'Hedging transaction cost (Default 0.0)')
+flags.DEFINE_string('obj_func', 'var', 'Objective function select from meanstd, var or cvar (Default var)')
 flags.DEFINE_integer('train_sim', 40_000, 'train episodes (Default 40_000)')
 flags.DEFINE_integer('eval_sim', 5_000, 'evaluation episodes (Default 40_000)')
-flags.DEFINE_integer('init_ttm', 60, 'number of days in one episode (Default 60)')
-flags.DEFINE_float('mu', 0.0, 'spot drift (Default 0.2)')
-flags.DEFINE_integer('n_step', 5, 'DRL TD Nstep (Default 5)')
-flags.DEFINE_float('init_vol', 0.2, 'initial spot vol (Default 0.2)')
-flags.DEFINE_float('poisson_rate', 1.0, 'possion rate of new optiosn in liability portfolio (Default 1.0)')
-flags.DEFINE_float('moneyness_mean', 1.0, 'new optiosn moneyness mean (Default 1.0)')
-flags.DEFINE_float('moneyness_std', 0.0, 'new optiosn moneyness std (Default 0.0)')
 flags.DEFINE_string('critic', 'c51', 'critic distribution type - c51, qr-huber, qr-gl, qr-gl_tl, '
                                      'qr-lapl, qr-lapl_tl, iqn-huber (Default c51)')
-flags.DEFINE_float('spread', 0.0, 'Hedging transaction cost (Default 0.0)')
-flags.DEFINE_string('obj_func', 'var', 'Objective function select from meanstd, var or cvar (Default var)')
-flags.DEFINE_float('std_coef', 1.645, 'Std coefficient when obj_func=meanstd. (Default 1.645)')
+
 flags.DEFINE_float('threshold', 0.95, 'Objective function threshold. (Default 0.95)')
-flags.DEFINE_float('vov', 0.0, 'Vol of vol, zero means BSM; non-zero means SABR (Default 0.0)')
-flags.DEFINE_list('liab_ttms',['60',], 'List of maturities selected for new adding option (Default [60,])')
-flags.DEFINE_integer('hed_ttm', 20, 'Hedging option maturity in days (Default 20)')
-flags.DEFINE_list('action_space', ['0','3'], 'Hedging action space (Default [0,3])')
-flags.DEFINE_string('logger_prefix', '', 'Prefix folder for logger (Default None)')
+flags.DEFINE_float('std_coef', 1.645, 'Std coefficient when obj_func=meanstd. (Default 1.645)')
+
+flags.DEFINE_string('dataset', '', 'Prefix folder for logger (Default None)')
 flags.DEFINE_string('agent_path', '', 'trained agent path, only used when eval_only=True')
 flags.DEFINE_boolean('eval_only', False, 'Ignore training (Default False)')
 flags.DEFINE_boolean('per', False, 'Use PER for Replay sampling (Default False)')
-flags.DEFINE_float('lr', 1e-4, 'Learning rate for optimizer (Default 1e-4)')
+#flags.DEFINE_float('lr', 1e-4, 'Learning rate for optimizer (Default 1e-4)')
+flags.DEFINE_integer('n_step', 5, 'DRL TD Nstep (Default 5)')
 flags.DEFINE_integer('batch_size', 256, 'Batch size to train the Network (Default 256)')
 flags.DEFINE_float('priority_exponent', 0.6, 'priority exponent for the Prioritized replay table (Default 0.6)')
 flags.DEFINE_float('importance_sampling_exponent', 0.2, 'importance sampling exponent for updating importance weight for PER (Default 0.2)')
-flags.DEFINE_boolean('vega_obs', False, 'Include portfolio vega and hedging option vega in state variables (Default False)')
-flags.DEFINE_integer('eval_seed', 1234, 'Evaluation Seed (Default 1234)')
-flags.DEFINE_boolean('gbm', False, 'GBM (Default False)')
-flags.DEFINE_boolean('sabr', False, 'SABR (Default False)')
 flags.DEFINE_boolean('specific_folder', False, 'override the manual timestamped folder generation')
-flags.DEFINE_string('run_id', '', 'Specific run ID (timestamp) to load for evaluation (Default: create new timestamp)')
-flags.DEFINE_string('runs_registry', './logs/runs_registry.csv', 'Path to the registry file that tracks all runs')
-
-# Create or use specified run folder
+flags.DEFINE_string('dataset_train', '','name of the training dataset from the data folder')
+flags.DEFINE_string('dataset_eval', '','name of the evaluation dataset from the data folder')
+flags.DEFINE_integer('eval_offset', 0, 'index offset in the given dataset from where the evaluation index is meant to start. ')
+flags.DEFINE_boolean('train_only', False, 'if true, doesnt evaluate')
+flags.DEFINE_string('run_tag', '', 'unique tag on run if desired')
 TS = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-if FLAGS.eval_only and FLAGS.run_id:
-    RUN_FOLDER = f"/run_{FLAGS.run_id}"
-    print(f"Evaluation mode: Using existing run folder {RUN_FOLDER}")
-else:
-    RUN_FOLDER = f"/run_{TS}"
-    print(f"Creating new run folder {RUN_FOLDER}")
-    
-    # Record this run in the registry
-    os.makedirs(os.path.dirname(FLAGS.runs_registry), exist_ok=True)
-    registry_exists = os.path.exists(FLAGS.runs_registry)
-    
-    with open(FLAGS.runs_registry, 'a') as f:
-        if not registry_exists:
-            f.write("timestamp,description,work_folder,obj_func,critic,eval_only\n")
-        
-        # Extract work_folder pattern that will be used
-        folder_pattern = f'spread={FLAGS.spread}_obj={FLAGS.obj_func}_threshold={FLAGS.threshold}_critic={FLAGS.critic}_v={FLAGS.vov}_hedttm={FLAGS.hed_ttm}'
-        if FLAGS.logger_prefix:
-            folder_pattern = f"{FLAGS.logger_prefix}/{folder_pattern}"
-            
-        f.write(f"{TS},{FLAGS.logger_prefix},{folder_pattern},{FLAGS.obj_func},{FLAGS.critic},{FLAGS.eval_only}\n")
 
 def make_logger(work_folder, label, terminal=False):
     
     loggers = [
-        log_utils.CSVLogger(f'./logs/{RUN_FOLDER}/{work_folder}', label=label, add_uid=False)
+        log_utils.CSVLogger(f'./logs/{work_folder}/run_{FLAGS.run_tag}', label=label, add_uid=False)
     ]
     if terminal:
         loggers.append(log_utils.TerminalLogger(label=label))
@@ -131,99 +99,19 @@ def make_environment(utils,log_bef=None, log_af=None, logger = None) -> dm_env.E
 
 
 
-
-def sinusoidal_time_embedding(
-    t_years: tf.Tensor,
-    dim: int,
-    base: float = 100.0,
-    scale: float = 2 * np.pi
-) -> tf.Tensor:
-    """
-    t_years: [...,1] or [...] float32 tensor in [0,1] (fraction of year)
-    dim:     even integer, total embedding size
-    base:    controls decay of frequencies
-    scale:   overall multiplier (2π to wrap 1 cycle over t=1)
-    returns: [..., dim] float32 tensor
-    """
-    # make sure we have shape [...], not [...,1]
-    t = tf.cast(tf.squeeze(t_years, axis=-1), tf.float32)  # now shape [...]
-    half = dim // 2
-    # build [half] frequency vector
-    i = tf.cast(tf.range(half), tf.float32)
-    freqs = tf.pow(base, -2.0 * i / tf.cast(dim, tf.float32))  # [half]
-    # angles: broadcast to [..., half]
-    angles = tf.expand_dims(t, -1) * scale * freqs
-    sin_emb = tf.sin(angles)  # [..., half]
-    cos_emb = tf.cos(angles)  # [..., half]
-    emb = tf.concat([sin_emb, cos_emb], axis=-1)  # [..., dim]
-    return tf.cast(emb, tf.float32)
-
-def embed_time_observation(obs: tf.Tensor, time_dim: int = 16, dt: float = 1/52) -> tf.Tensor:
-    # Split off the last element as the integer time index
-    core  = obs[..., :-1]               # all features except t
-    t_raw = obs[..., -1:]               # shape [...,1]
-
-    # Convert step index to continuous years
-    t_cont = tf.cast(t_raw, tf.float32) * dt  # now in [0, total_years]
-
-    # Sinusoidal embed into `time_dim` dims
-    t_embed = sinusoidal_time_embedding(t_cont, time_dim)
-
-    # Final observation vector
-    return tf.cast(tf.concat([core, t_embed], axis=-1), tf.float32)
-
-import numpy as np
-import sonnet as snt
-import tensorflow as tf
-import tensorflow_probability as tfp
-import matplotlib.pyplot as plt
-
-# Alias for bijectors
-tfb = tfp.bijectors
-
-
-
-# The default settings in this network factory will work well for the
-# TradingENV task but may need to be tuned for others. In
-# particular, the vmin/vmax and num_atoms hyperparameters should be set to
-# give the distributional critic a good dynamic range over possible discounted
-# returns. Note that this is very different than the scale of immediate rewards.
-
-
-
-
-
-
-def make_networks(
+def make_quantile_networks(
     action_spec: specs.BoundedArray,
-    policy_layer_sizes: Sequence[int] = (256, 256, 256),
-    critic_layer_sizes: Sequence[int] = (512, 512, 256),
-    vmin: float = -150.,
-    vmax: float = 150.,
-    num_atoms: int = 51,
-    max_time_steps: int = 100,  # Maximum number of time steps in an episode
-    time_embedding_dim: int = 16,  # Dimension of the time embedding
-) -> Mapping[str, types.TensorTransformation]:
+    policy_layer_sizes: Sequence[int] = (32, 32,32),
+    critic_layer_sizes: Sequence[int] =  (64,64, 64),
+    quantile_interval: float = 0.01, 
+    ) -> Mapping[str, types.TensorTransformation]:
     """Creates the networks used by the agent."""
-
+    print("USING QUANTILE NETWORK")
     # Get total number of action dimensions from action spec.
     num_dimensions = np.prod(action_spec.shape, dtype=int)
 
-
-
-    # Create a time embedding layer.
-    time_embedding_layer = tf.keras.layers.Embedding(input_dim=max_time_steps, output_dim=time_embedding_dim)
-    
-    # Create the shared observation network.
-    def observation_with_time(obs):
-        # Assume the last dimension of the observation is the time step (integer).
-        features, time_step = obs[..., :-1], tf.cast(obs[..., -1], tf.int32)
-        time_embedding = time_embedding_layer(time_step)
-        return tf.concat([features, time_embedding], axis=-1)
-    
-    observation_network = observation_with_time
     # Create the shared observation network; here simply a state-less operation.
-    #observation_network = tf2_utils.batch_concat
+    observation_network = tf2_utils.batch_concat
 
     # Create the policy network.
     policy_network = snt.Sequential([
@@ -231,62 +119,6 @@ def make_networks(
         networks.NearZeroInitializedLinear(num_dimensions),
         networks.TanhToSpec(action_spec),
     ])
-
-    # Create the critic network.
-    critic_network = snt.Sequential([
-        # The multiplexer concatenates the observations/actions.
-        networks.CriticMultiplexer(),
-        networks.LayerNormMLP(critic_layer_sizes, activate_final=True),
-        ad.RiskDiscreteValuedHead(vmin, vmax, num_atoms),
-    ])
-
-    # return {
-    #     'policy': policy_network,
-    #     'critic': critic_network,
-    #     'observation': observation_network,
-    # }
-
-def make_quantile_networks(
-    action_spec: specs.BoundedArray,
-    policy_layer_sizes: Sequence[int] = (256, 256, 256), # (64, 64)
-    #policy_layer_sizes: Sequence[int] = (32, 32),
-    critic_layer_sizes: Sequence[int] =  (512, 512, 256),
-    #critic_layer_sizes: Sequence[int] =  (64, 64),
-    quantile_interval: float = 0.01, 
-    ) -> Mapping[str, types.TensorTransformation]:
-    """Creates the networks used by the agent."""
-
-    # Get total number of action dimensions from action spec.
-    num_dimensions = np.prod(action_spec.shape, dtype=int)
-
-    #vol_kernel = KernelLayer(a_scale=0.1, b_scale=0.3, c_scale=1.5, d_scale = 0.1)
-    #volvol_kernel = KernelLayer(a_scale=1.5, b_scale=0.3, c_scale=3, d_scale = 0.5)
-
-
-
-    # Wrap as a Sonnet module so Acme can call it.
-    #observation_network = ObservationWithKernel(vol_kernel=vol_kernel, volvol_kernel=volvol_kernel)
-
-
-    observation_network = tf2_utils.batch_concat
-
-    # Create the policy network.
-    internal_action_spec = specs.BoundedArray(
-        shape=(1,),   # e.g. [a_mag, a_dir]
-        dtype=np.float32,
-        minimum=0.0,
-        maximum=1.0,
-        name="internal_action",
-        )
-    internal_action_dim = 1
-    
-    base_policy = snt.Sequential([
-        networks.LayerNormMLP(policy_layer_sizes, activate_final=True),
-        networks.NearZeroInitializedLinear(internal_action_dim),
-        networks.TanhToSpec(internal_action_spec),
-    ])
-    
-    policy_network = PolicyWithHedge( base_policy=base_policy)
     quantiles = np.arange(quantile_interval, 1.0, quantile_interval)
     # Create the critic network.
     critic_network = snt.Sequential([
@@ -296,44 +128,11 @@ def make_quantile_networks(
         ad.QuantileDiscreteValuedHead(quantiles=quantiles, prob_type=ad.QuantileDistProbType.MID),
     ])
     
-
     return {
         'policy': policy_network,
         'critic': critic_network,
         'observation': observation_network,
-    }#, vol_kernel, volvol_kernel
-
-def make_iqn_networks(
-    action_spec: specs.BoundedArray,
-    cvar_th: float,
-    n_cos=64, n_tau=8, n_k=32,
-    policy_layer_sizes: Sequence[int] = (64, 64), # (256, 256, 256)
-    critic_layer_sizes: Sequence[int] = (128, 128), # (512, 512, 256)
-    quantile_interval: float = 0.01
-) -> Mapping[str, types.TensorTransformation]:
-    """Creates the networks used by the agent."""
-
-    # Get total number of action dimensions from action spec.
-    num_dimensions = np.prod(action_spec.shape, dtype=int)
-
-    # Create the shared observation network; here simply a state-less operation.
-    observation_network = tf2_utils.batch_concat
-
-    # Create the policy network.
-    policy_network = snt.Sequential([
-        networks.LayerNormMLP(policy_layer_sizes, activate_final=True),
-        networks.NearZeroInitializedLinear(num_dimensions),
-        networks.TanhToSpec(action_spec),
-    ])
-    quantiles = np.arange(quantile_interval, 1.0, quantile_interval)
-    # Create the critic network.
-    critic_network = ad.IQNCritic(cvar_th, n_cos, n_tau, n_k, critic_layer_sizes, quantiles, ad.QuantileDistProbType.MID)
-    
-    # return {
-    #     'policy': policy_network,
-    #     'critic': critic_network,
-    #     'observation': observation_network,
-    # }
+    }
 
 def save_policy(policy_network, checkpoint_folder):
     
@@ -358,190 +157,138 @@ def save_agent(policy_network, observation_network, checkpoint_folder):
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     policy_snapshot = make_snapshot(policy_network)
     observation_snapshot = make_snapshot(observation_network)
-    policy_save_path = f"{checkpoint_folder}/policy_{timestamp}"
-    observation_save_path = f"{checkpoint_folder}/observation_{timestamp}"
+    policy_save_path = f"{checkpoint_folder}/policy"
+    observation_save_path = f"{checkpoint_folder}/observation"
     tf.saved_model.save(policy_snapshot, policy_save_path)
     tf.saved_model.save(observation_snapshot, observation_save_path)
     print(f"Policy and observation networks saved to {policy_save_path} and {observation_save_path}")
 
 def load_agent(policy_network, observation_network, checkpoint_folder):
+    # First initialize the networks with dummy inputs to create variables
+    # Create dummy batch with appropriate dimensions for the environment
+    dummy_obs = tf.zeros([1, 8], dtype=tf.float32)  # Adjust dimensions as needed for your environment
+    
+    # Initialize observation network
+    processed_obs = observation_network(dummy_obs)
+    
+    # Initialize policy network with processed observation
+    _ = policy_network(processed_obs)
+    
+    # Now that variables are initialized, load the saved weights
     trainable_variables_snapshot = {}
     load_policy_net = tf.saved_model.load(checkpoint_folder+'/policy')
     load_observation_net = tf.saved_model.load(checkpoint_folder+'/observation')
+    
+    print(f"Loading policy network with {len(load_policy_net.trainable_variables)} variables")
+    print(f"Target policy network has {len(policy_network.trainable_variables)} variables")
+    
     for var in load_policy_net.trainable_variables:
-        trainable_variables_snapshot['/'.join(
-            var.name.split('/')[1:])] = var.numpy()
+        var_name = '/'.join(var.name.split('/')[1:])
+        trainable_variables_snapshot[var_name] = var.numpy()
+        
     for var in policy_network.trainable_variables:
         var_name_wo_name_scope = '/'.join(var.name.split('/')[1:])
-        var.assign(
-            trainable_variables_snapshot[var_name_wo_name_scope])
+        if var_name_wo_name_scope in trainable_variables_snapshot:
+            var.assign(trainable_variables_snapshot[var_name_wo_name_scope])
+        else:
+            print(f"WARNING: Variable {var_name_wo_name_scope} not found in saved model")
+    
     trainable_variables_snapshot = {}
+    print(f"Loading observation network with {len(load_observation_net.trainable_variables)} variables")
+    print(f"Target observation network has {len(observation_network.trainable_variables)} variables")
+    
     for var in load_observation_net.trainable_variables:
-        trainable_variables_snapshot['/'.join(
-            var.name.split('/')[1:])] = var.numpy()
+        var_name = '/'.join(var.name.split('/')[1:])
+        trainable_variables_snapshot[var_name] = var.numpy()
+        
     for var in observation_network.trainable_variables:
         var_name_wo_name_scope = '/'.join(var.name.split('/')[1:])
-        var.assign(
-            trainable_variables_snapshot[var_name_wo_name_scope])
-
-def list_available_runs():
-    """Print a list of available runs from the registry."""
-    if not os.path.exists(FLAGS.runs_registry):
-        print("No runs registry found. Run training first to create some models.")
-        return
-        
-    print("\nAvailable Runs:")
-    print("-" * 80)
-    print(f"{'Timestamp':<15} | {'Description':<20} | {'Objective':<10} | {'Critic':<10}")
-    print("-" * 80)
-    
-    with open(FLAGS.runs_registry, 'r') as f:
-        # Skip header
-        next(f)
-        for line in f:
-            parts = line.strip().split(',')
-            if len(parts) >= 5:  # Make sure we have enough columns
-                ts, desc, _, obj, critic = parts[:5]
-                print(f"{ts:<15} | {desc:<20} | {obj:<10} | {critic:<10}")
-    
-    print("\nTo evaluate a specific run, use: --eval_only=True --run_id=TIMESTAMP")
-    print("-" * 80)
+        if var_name_wo_name_scope in trainable_variables_snapshot:
+            var.assign(trainable_variables_snapshot[var_name_wo_name_scope])
+        else:
+            print(f"WARNING: Variable {var_name_wo_name_scope} not found in saved model")
 
 def main(argv):
-    # Show available runs if requested
-    if FLAGS.eval_only and not FLAGS.run_id and not FLAGS.agent_path:
-        list_available_runs()
-        print("Please specify a run_id to evaluate.")
-        return
 
     
-    
-    from agent.agent import D4PG
 
-    # work_folder = f'spread={FLAGS.spread}_obj={FLAGS.obj_func}_threshold={FLAGS.threshold}_critic={FLAGS.critic}_v={FLAGS.vov}_hedttm={FLAGS.hed_ttm}_elastic_reward_k={FLAGS.elastic_reward_k}'
-    work_folder = f'spread={FLAGS.spread}_obj={FLAGS.obj_func}_threshold={FLAGS.threshold}_critic={FLAGS.critic}_v={FLAGS.vov}_hedttm={FLAGS.hed_ttm}'
-    if FLAGS.logger_prefix:
-        work_folder = FLAGS.logger_prefix + "/" + work_folder
+
+    work_folder = f'{FLAGS.obj_func}/{FLAGS.dataset_train}/{FLAGS.spread_train}'
     # Create an environment, grab the spec, and use it to create networks.
-    # utils = Utils(init_ttm=FLAGS.init_ttm, np_seed=1234, num_sim=FLAGS.train_sim, spread=FLAGS.spread, volvol=FLAGS.vov, sabr=FLAGS.sabr, gbm=FLAGS.gbm, hed_ttm=FLAGS.hed_ttm,
-    #               init_vol=FLAGS.init_vol, poisson_rate=FLAGS.poisson_rate, 
-    #               moneyness_mean=FLAGS.moneyness_mean, moneyness_std=FLAGS.moneyness_std, 
-    #               mu=FLAGS.mu, ttms=[int(ttm) for ttm in FLAGS.liab_ttms],
-    #              action_low=float(FLAGS.action_space[0]), action_high=float(FLAGS.action_space[1]))
-    utils = Utils(n_episodes=FLAGS.train_sim, tenor=4, spread=FLAGS.spread)
+    utils = Utils(n_episodes=FLAGS.train_sim, tenor=4, spread=FLAGS.spread_train, data_path=FLAGS.dataset_train)
     loggers = make_loggers(work_folder=work_folder)
-    train_logfunc = TrainLog()
+
     train_log_bef = lambda self, result,t: None#train_logfunc._log_before
     train_log_af = lambda self, result,t: None#train_logfunc._log_after
     environment = make_environment(utils=utils, log_bef=train_log_bef, log_af=train_log_af)#, logger=loggers['train_loop'])
     environment_spec = specs.make_environment_spec(environment)
-    if FLAGS.critic == 'c51':
-        agent_networks = make_networks(action_spec=environment_spec.actions, max_time_steps=utils.num_period)
-    elif 'qr' in FLAGS.critic:
-        agent_networks = make_quantile_networks(action_spec=environment_spec.actions)
-    elif FLAGS.critic == 'iqn':
-        assert FLAGS.obj_func == 'cvar', 'IQN only support CVaR objective.'
-        agent_networks = make_iqn_networks(action_spec=environment_spec.actions,cvar_th=FLAGS.threshold, max_time_steps=FLAGS.init_ttm)
 
+
+    agent_networks = make_quantile_networks(action_spec=environment_spec.actions)
 
     # Construct the agent.
     agent = D4PG(
         obj_func=FLAGS.obj_func,
-        threshold=FLAGS.threshold,
+        threshold=0.95,
         critic_loss_type=FLAGS.critic,
         environment_spec=environment_spec,
         policy_network=agent_networks['policy'],
         critic_network=agent_networks['critic'],
         observation_network=agent_networks['observation'],
         n_step=FLAGS.n_step,
-        discount=0.98,
+        discount=0.985,
         sigma=0.3,  # pytype: disable=wrong-arg-types
         checkpoint=False,
         logger=loggers['learner'],
         batch_size=FLAGS.batch_size,
-        policy_optimizer=snt.optimizers.Adam(1e-4),
-        critic_optimizer=snt.optimizers.Adam(1e-4),
+        policy_optimizer=snt.optimizers.Adam(5e-4),
+        critic_optimizer=snt.optimizers.Adam(5e-4),
         annealer_steps = 200000*6
     )
-    #utils.vol_kernel = agent._learner._observation_network.vol_kernel
-    #utils.volvol_kernel = agent._learner._observation_network.volvol_kernel
+
     
     # Create the environment loop used for training.
     if not FLAGS.eval_only:
         train_loop = acme.EnvironmentLoop(environment, agent, label='train_loop', logger=loggers['train_loop'])
         train_loop.run(num_episodes=FLAGS.train_sim)
-        save_agent(agent._learner._policy_network, agent._learner._observation_network, f'./logs/{RUN_FOLDER}/{work_folder}')
-        threshold=FLAGS.threshold,
-    # Create the evaluation policy.ic,
-    if FLAGS.eval_only:c=environment_spec,
-        policy_net = agent._learner._policy_network
-        observation_net = agent._learner._observation_network
-        networks['observation'],
-        # Determine which path to load from
-        if FLAGS.agent_path:unt=0.98,
-            # Use explicitly provided agent path
-            load_path = FLAGS.agent_path
-            print(f"Loading agent from explicit path: {load_path}")
-        elif FLAGS.run_id:S.batch_size,
-            # Construct path from run_id and work_folderlicy_optimizer=snt.optimizers.Adam(1e-4),
-            load_path = f'./logs/run_{FLAGS.run_id}/{work_folder}'ritic_optimizer=snt.optimizers.Adam(1e-4),
-            print(f"Loading agent from run_id path: {load_path}")
+        save_agent(agent._learner._policy_network, agent._learner._observation_network, f'./logs/{work_folder}/run_{FLAGS.run_tag}')
+    if not FLAGS.train_only:
+        # Create the evaluation policy.
+        if FLAGS.eval_only:
+            policy_net = agent._learner._policy_network
+            observation_net = agent._learner._observation_network
+            if FLAGS.agent_path == '':
+                load_agent(policy_net, observation_net, f'./logs/{work_folder}/run_{FLAGS.run_tag}')
+            else:
+                load_agent(policy_net, observation_net, FLAGS.agent_path)
+            eval_policy = snt.Sequential([
+                agent_networks['observation'],
+                policy_net,
+            ])
         else:
-            # Default to current run folder (backward compatibility)r._observation_network.vol_kernel
-            load_path = f'./logs/{RUN_FOLDER}/{work_folder}'.volvol_kernel = agent._learner._observation_network.volvol_kernel
-            print(f"Loading agent from current run folder: {load_path}")    
-            p used for training.
-        load_agent(policy_net, observation_net, load_path)
-        'train_loop', logger=loggers['train_loop'])
-        eval_policy = snt.Sequential([      train_loop.run(num_episodes=FLAGS.train_sim)
-            agent_networks['observation'],./logs/{RUN_FOLDER}/{work_folder}')n(main)if __name__ == '__main__':    Path(f'./logs/{RUN_FOLDER}/{work_folder}/ok').touch()    print("Successfully finished.")    eval_loop.run(num_episodes=FLAGS.eval_sim)       eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))    eval_log_af = eva_logfunc._log_after    eval_log_bef = eva_logfunc._log_before    eva_logfunc = EvalLog()    #eval_utils.volvol_kernel = agent._learner._target_observation_network.volvol_kernel        eval_policy = snt.Sequential([
-            policy_net,            agent_networks['observation'],
-        ])cy'],
+            eval_policy = snt.Sequential([
+                agent_networks['observation'],
+                agent_networks['policy'],
+            ])
+
+        print("Starting evaluation")
+        # Create the evaluation actor and loop.
+        eval_actor = actors.FeedForwardActor(policy_network=eval_policy)
+    
+        eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread_eval, test=True, test_episode_offset=FLAGS.eval_offset, data_path=FLAGS.dataset_eval)
+        #eval_utils.vol_kernel = agent._learner._target_observation_network.vol_kernel
+        #eval_utils.volvol_kernel = agent._learner._target_observation_network.volvol_kernel
+        eva_logfunc = EvalLog()
+        eval_log_bef = eva_logfunc._log_before
+        eval_log_af = eva_logfunc._log_after
+        eval_folder = f'/{FLAGS.dataset_eval}/{FLAGS.spread_eval}'
+        eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder+eval_folder,'eval_env'))
+        eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])
+        eval_loop.run(num_episodes=FLAGS.eval_sim)   
     else:
-        eval_policy = snt.Sequential([y_network
-            agent_networks['observation'],._observation_network  print("Starting evaluation")
-            agent_networks['policy'],
-        ])
+        print("FLAG: 'train_only is TRUE. Skipping evaluation.")
+    print("Successfully finished.")
+    Path(f'./logs/{work_folder}/run_{FLAGS.run_tag}/ok').touch()
 
-    print("Starting evaluation")observation_net, FLAGS.agent_path)isodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread, test=True)
-    # Create the evaluation actor and loop.r._target_observation_network.vol_kernel
-    eval_actor = actors.FeedForwardActor(policy_network=eval_policy)            agent_networks['observation'],earner._target_observation_network.volvol_kernel
-  
-    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread, test=True)
-    #eval_utils.vol_kernel = agent._learner._target_observation_network.vol_kernel    else:
-ls=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))
-, label='eval_loop', logger=loggers['eval_loop'])
-    eval_loop.run(num_episodes=FLAGS.eval_sim)   
-nished.")
-/{RUN_FOLDER}/{work_folder}/ok').touch()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    app.run(main)if __name__ == '__main__':    Path(f'./logs/{RUN_FOLDER}/{work_folder}/ok').touch()    print("Successfully finished.")    eval_loop.run(num_episodes=FLAGS.eval_sim)       eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))    eval_log_af = eva_logfunc._log_after    eval_log_bef = eva_logfunc._log_before    eva_logfunc = EvalLog()    #eval_utils.volvol_kernel = agent._learner._target_observation_network.volvol_kernel    #eval_utils.vol_kernel = agent._learner._target_observation_network.vol_kernel    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread, test=True)      eval_actor = actors.FeedForwardActor(policy_network=eval_policy)    # Create the evaluation actor and loop.    print("Starting evaluation")        ])            agent_networks['policy'],            agent_networks['observation'],    Path(f'./logs/{RUN_FOLDER}/{work_folder}/ok').touch()    print("Successfully finished.")    eval_loop.run(num_episodes=FLAGS.eval_sim)       eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=loggers['eval_loop'])    eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))    eval_log_af = eva_logfunc._log_after    eval_log_bef = eva_logfunc._log_before    eva_logfunc = EvalLog()    #eval_utils.volvol_kernel = agent._learner._target_observation_network.volvol_kernel        eval_policy = snt.Sequential([if __name__ == '__main__':
+if __name__ == '__main__':
     app.run(main)

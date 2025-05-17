@@ -23,11 +23,7 @@ class StepResult:
     episode: int = 0
     t: int = 0
     action_swaption: float = 0.0
-    #action_swap_hed: float = 0.0
-    #action_swap_liab: float = 0.0
-    #action_swap_hed_mag: float = 0.0
-    #action_swap_liab_mag: float = 0.0
-    swap_rate: float = 0.0
+
     cost_swaption_hed: float = 0.0
     cost_swap_hed: float = 0.0
     step_pnl: float = 0.0
@@ -40,23 +36,34 @@ class StepResult:
     delta_before: float = 0.0
     delta_after: float = 0.0
 
+    gamma_local_hed_before: float = 0.0
+    gamma_local_hed_after: float = 0.0
     gamma_before: float = 0.0
     gamma_after: float = 0.0
-    #vega_before: float = 0.0
-    #vega_after: float = 0.0
+    gamma_hed: float = 0.0
+    gamma_liab: float = 0.0
+    gamma_hed_before: float = 0.0
+    gamma_liab_before: float = 0.0
+    gamma_hed_after: float = 0.0
+    gamma_liab_after: float = 0.0
+    vega_local_hed_before: float = 0.0
+    vega_local_hed_after: float = 0.0
+    vega_before: float = 0.0
+    vega_after: float = 0.0
 
     action_gamma: float = 0.0
-    #action_vega: float = 0.0
-    #vega_ratio: float = 0.0
     
     # State fields
     rate_norm: float = 0.0
+    rate_liab_norm: float = 0.0
     hed_cost_norm: float = 0.0
     gamma_unit_norm: float = 0.0
     vega_unit_norm: float = 0.0
     gamma_ratio: float = 0.0
     iv_norm: float = 0.0
+    iv_liab_norm: float = 0.0
     ttm: float = 0.0
+    gamma_port_sign: int = 0
 
 class TrainLog:
     @staticmethod
@@ -67,15 +74,19 @@ class TrainLog:
         pass
 class EvalLog:
     @staticmethod
-    def _log_before(self, result,t):
+    def _log_before(self, result:StepResult,t):
         
-            result.gamma_before,  result.delta_local_hed_before = self.portfolio.get_kernel_greek_risk(t)
+            result.gamma_before ,result.gamma_local_hed_before, result.delta_local_hed_before, result.vega_before, = self.portfolio.get_kernel_greek_risk(t)
             result.delta_before = self.portfolio.get_delta(self.t)
+            result.gamma_hed_before = self.portfolio.hed_port.get_gamma(t)
+            result.gamma_liab_before = self.portfolio.liab_port.get_gamma(t)
     @staticmethod
-    def _log_after(self, result,t):
+    def _log_after(self, result:StepResult,t):
 
-        result.gamma_after, result.delta_local_hed_after = self.portfolio.get_kernel_greek_risk(t)
+        result.gamma_after,result.gamma_local_hed_after, result.delta_local_hed_after,  result.vega_after = self.portfolio.get_kernel_greek_risk(t)
         result.delta_after = self.portfolio.get_delta(self.t) # portfolio delta
+        result.gamma_hed_after = self.portfolio.hed_port.get_gamma(t)
+        result.gamma_liab_after = self.portfolio.liab_port.get_gamma(t)
         self.logger.write(dataclasses.asdict(result))
 
 class TradingEnv(gym.Env):
@@ -118,7 +129,7 @@ class TradingEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf,    
             high=+np.inf,
-            shape=(7,),
+            shape=(9,),
             dtype=np.float32
         )
 
@@ -157,7 +168,7 @@ class TradingEnv(gym.Env):
         profit and loss period reward
         """
         t = self.t
-        action = action[0]
+        action = action[0]*1.5
         result = StepResult( episode=self.sim_episode, t=t)
 
         result.action_gamma = action
@@ -181,14 +192,13 @@ class TradingEnv(gym.Env):
         self.t = self.t + 1
 
         state = self.portfolio.get_state(self.t)
-        result.rate_norm, result.hed_cost_norm, result.vega_unit_norm, result.gamma_ratio, result.gamma_unit_norm, result.iv_norm, result.ttm = state
+        result.rate_norm, result.rate_liab_norm, result.hed_cost_norm, result.gamma_ratio, result.gamma_unit_norm, result.iv_norm, result.iv_liab_norm, result.ttm, result.gamma_port_sign = state
         if self.t == self.num_period-1:
             done = True
-            state[[2,3,4,5]] = 0 # all greeks to 0
+            #state[[2,3,4]] = 0 # swaptions doesnt expire at episode end, so greeks say. 
         else:
             done = False
         
         self.log_af(self,result,t)
-
         info = {"path_row": self.sim_episode}
         return state, reward, done, info

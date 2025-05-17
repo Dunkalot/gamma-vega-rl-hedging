@@ -49,229 +49,7 @@ import sonnet as snt
 import tensorflow as tf
 import numpy as np
 
-class KernelLayer(snt.Module):
-    """
-    1D kernel that can be either trainable or static,
-    depending on trainable flag.
-    """
-    def __init__(self,
-                 tenor_grid: np.ndarray = None,
-                 init_params: dict = None,
-                 a_scale: float = 1.0,
-                 b_scale: float = 1.0,
-                 c_scale: float = 1.0,
-                 d_scale: float = 1.0,
-                 eta_scale: float = 0.95,
-                 beta_scale: float = 0.5,
-                 default_anchor_index: int = 52,
-                 name: str = None,
-                 trainable: bool = True):
-        super().__init__(name=name)
-        # Build tenor grid
-        if tenor_grid is None:
-            tau_vals = np.arange(0, 2 + 1e-6, 1/52, dtype=np.float32)
-        else:
-            tau_vals = np.array(tenor_grid, dtype=np.float32)
-        self.tau_grid = tf.constant(tau_vals, dtype=tf.float32)
-        self.default_anchor = int(default_anchor_index)
-        self.trainable = trainable
 
-        # Defaults if init_params is None
-        defaults = init_params or {
-            'a':    a_scale*0.5,
-            'b':    b_scale*0.5,
-            'c':    c_scale*0.5,
-            'd':    d_scale*0.5,
-            'eta':  eta_scale*0.5,
-            'beta': beta_scale*0.5
-        }
-
-        def make_bij(scale, shift=0.0):
-            chain = []
-            if shift != 0.0:
-                chain.append(tfb.Shift(shift))
-            chain.append(tfb.Scale(scale))
-            chain.append(tfb.Sigmoid())
-            return tfb.Chain(chain)
-
-        # Helper to create either a constant or a TransformedVariable
-        def param(name, init, scale, shift=0.0):
-            if self.trainable:
-                return tfp.util.TransformedVariable(
-                    init,
-                    bijector=make_bij(scale, shift),
-                    name=name
-                )
-            else:
-                # assume init is already in the *final* scaled space
-                return tf.constant(init, dtype=tf.float32, name=name)
-
-        # Create the six parameters
-        self.a    = param('a',    defaults['a'],    a_scale)
-        self.b    = param('b',    defaults['b'],    b_scale)
-        self.c    = param('c',    defaults['c'],    c_scale)
-        self.d    = param('d',    defaults['d'],    d_scale, shift=0.001)
-        self.eta  = param('eta',  defaults['eta'],  eta_scale)
-        self.beta = param('beta', defaults['beta'], beta_scale, shift=0.01)
-
-    @tf.function(jit_compile=True)
-    def _weights_for_anchor(self, anchor_index: int) -> tf.Tensor:
-        tau     = self.tau_grid                          # [T]
-        vols    = (self.a + self.b * tau) * tf.exp(-self.c * tau) + self.d  # [T]
-        vol_ref = tf.gather(vols, anchor_index)          # scalar
-        tau_ref = tf.gather(tau, anchor_index)           # scalar
-        time_dist = tf.abs(tau - tau_ref)                # [T]
-        corr   = self.eta + (1. - self.eta) * tf.exp(-self.beta * time_dist)  # [T]
-        return corr * (vols / vol_ref)                   # [T]
-
-    @tf.function(jit_compile=True)
-    def __call__(self,
-                 risk_vector: tf.Tensor,
-                 anchor_index: int = None) -> tf.Tensor:
-        idx = anchor_index if anchor_index is not None else self.default_anchor
-        w   = self._weights_for_anchor(idx)              # [T]
-        return tf.reduce_sum(risk_vector * w, axis=-1)
-
-    @tf.function
-    def weight_single(self,
-                      source_idx: int,
-                      target_idx: Optional[int] = None) -> tf.Tensor:
-        tgt = target_idx if target_idx is not None else self.default_anchor
-        return self._weights_for_anchor(source_idx)[tgt]
-    
-
-
-class ObservationWithKernel(snt.Module):
-    """
-    Sonnet module that applies shared KernelLayer transforms to raw observations.
-    With added debugging to diagnose delta neutralization issues.
-    """
-    def __init__(self,
-                 vol_kernel: KernelLayer,
-                 volvol_kernel: KernelLayer,
-                 default_anchor_index: int = np.int32(52),
-                 name: str = None):
-        super().__init__(name=name)
-        self.vol_kernel = vol_kernel
-        self.volvol_kernel = volvol_kernel
-        self.default_anchor = default_anchor_index
-        self.anchor_hed = int(default_anchor_index)
-        self.anchor_liab = int(default_anchor_index * 2)
-        
-    @tf.function(jit_compile=True)
-    def __call__(self, observation: tf.Tensor) -> tf.Tensor:
-        # 1) base features
-        swaption_gamma = observation[:, 0]
-        #swaption_vega  = observation[..., 1]
-        swaption_delta = observation[..., 1]
-        swap_delta_hed = observation[..., 2]
-        swap_delta_liab = observation[..., 3]
-        base_features = observation[..., 4:7]  # [...,3]
-
-        # 2) greek block
-        greek_block = observation[..., 7:]
-        gamma_vector = greek_block[..., :104]
-        delta_vector  = greek_block[..., 104:209]
-        #delta_vector = greek_block[..., 210:]
-
-        # 3) compute hedge ratios
-        gamma_ratio = tf.math.divide_no_nan(self.vol_kernel(gamma_vector), swaption_gamma)
-        #vega_ratio = tf.math.divide_no_nan(self.volvol_kernel(vega_vector), swaption_vega)
-        
-        delta_local_hed = self.vol_kernel(delta_vector, anchor_index=self.anchor_hed)
-        delta_local_liab = self.vol_kernel(delta_vector, anchor_index=self.anchor_liab)
-        
-
-        # cross‑kernel entries
-        k12_raw = self.vol_kernel.weight_single(self.anchor_hed, target_idx=self.anchor_liab)
-        k21_raw = self.vol_kernel.weight_single(self.anchor_liab, target_idx=self.anchor_hed)
-        
-
-        
-        # First row in swap_hed-notional-quoted delta risk 
-        k11 = tf.stack([1.],-1)
-        k12 = tf.stack([k12_raw],-1) 
-        
-        # Second row in swap_liab-notional-quoted delta risk 
-        k21 = tf.stack([k21_raw],-1) 
-        k22 = tf.stack([1.],-1)
-
-        det = k11 * k22 - k12 * k21
-        
-
-
-        # Solve the linear system
-        swap_bound_hed = tf.math.divide_no_nan((k22 * delta_local_hed - k12 * delta_local_liab), det* swap_delta_hed)
-        swap_bound_liab = tf.math.divide_no_nan((k11 * delta_local_liab - k21 * delta_local_hed), det * swap_delta_liab)
-
-        # For calculating the swap bound adjustment from swaption
-        mat_entries = tf.math.divide_no_nan(
-            tf.stack([k11*k21, k12*k21, k21, k22], -1), 
-            tf.expand_dims(det, axis=-1)
-        )
-        batch = tf.shape(gamma_ratio)[0]      # dynamic batch size
-        n     = tf.shape(mat_entries)[0]      # length of your vector, here 4
-
-        # turn [n] → [1, n], then broadcast to [batch, n]
-        mat_entries = tf.broadcast_to(
-            tf.expand_dims(mat_entries, 0),   # [1, n]
-            [batch, n]                        # [batch, n]
-        )
-        
-        delta_ratio_swaption_swap_hed = tf.math.divide_no_nan(swaption_delta, swap_delta_hed)
-        delta_ratio_swaption_swap_liab = tf.math.divide_no_nan(swaption_delta, swap_delta_liab)
-
-        hedge_bound_features = tf.stack([ 
-            gamma_ratio, 
-            delta_ratio_swaption_swap_hed, delta_ratio_swaption_swap_liab, 
-            swap_bound_hed, swap_bound_liab
-        ], axis=-1)
-
-        # 5) concatenate output
-        result = tf.concat([hedge_bound_features, mat_entries, base_features], axis=-1)
-        result = tf.ensure_shape(result, [None, 12])
-        return result
-
-#         return  result
-
-
-class PolicyWithHedge(snt.Module):
-    def __init__(self,
-                 base_policy: snt.Module,
-                 name=None):
-        super().__init__(name=name)
-        self.base_pol = base_policy
-        self._a = tf.Variable(5.0, trainable=False, dtype=tf.float32)
-    def set_temperature(self, new_a: float):
-        # call this once per learner step
-        self._a.assign(new_a)
-
-    # @tf.function(jit_compile=True)
-    # def __call__(self, obs):
-    #     # unpack features
-    #     gamma_port      = tf.expand_dims(obs[..., -1], -1)
-    #     gamma_port_sign = tf.expand_dims(obs[..., -2], -1)
-    #     threshold       = self.base_pol(obs[..., :-1])
-    #     #threshold = tf.math.softplus(threshold)
-    #     # temperature‐scaled softplus
-    #     term = tf.abs(gamma_port) - threshold
-    #     a = self._a
-    #     action_gamma = -gamma_port_sign * tf.math.softplus(term / a) * a
-    #     #tf.print(threshold, term, action_gamma,a)
-    #     return action_gamma
-    @tf.function(jit_compile=True)
-    def __call__(self, obs):
-        # unpack features
-        #gamma_port      = tf.expand_dims(obs[..., -1], -1)
-        #gamma_port_sign = tf.expand_dims(obs[..., -2], -1)
-        threshold       = self.base_pol(obs)
-        #threshold = tf.math.softplus(threshold)
-        # temperature‐scaled softplus
-        #term = tf.abs(gamma_port) - threshold
-        #a = self._a
-        #action_gamma = -gamma_port_sign * tf.math.softplus(term / a) * a
-        #tf.print(threshold, term, action_gamma,a)
-        return threshold
 
 
 
@@ -667,15 +445,16 @@ class GammaHedgeAgent(core.Actor):
     This is the baseline-Delta Gamma Agent implementation.
     Output: Hedging Actions - Alpha, computed analytically following the alpha approach defined in the paper.
     """
-    def __init__(self, running_env, hedge_ratio=1.0) -> None:
+    def __init__(self, running_env, hedge_ratio=1.0, risk_limit=False) -> None:
         self.env = running_env
         self.hedge_ratio = hedge_ratio
+        self.risk_limit = risk_limit
         super().__init__()
     
     def select_action(self, observation: types.NestedArray) -> types.NestedArray:
         episode = self.env.sim_episode
         t = self.env.t
-        current_gamma = observation[-1]
+        current_gamma = observation[2] * observation[3] * 1000
         
         hedge_gamma = self.hedge_ratio*current_gamma
         #hedge_option = self.env.portfolio.hed_port.options[episode,t]
@@ -695,8 +474,11 @@ class GammaHedgeAgent(core.Actor):
         #high_val = np.max(action_high)
 
         #alpha = (hed_share - low_val)/(high_val - low_val)
-        
-        return np.array([self.hedge_ratio])
+        gamma_hedge = self.hedge_ratio
+        gamma_risk_limit = 0.1*73837650
+        if self.risk_limit:
+            gamma_hedge = 0 if current_gamma <= gamma_risk_limit else gamma_hedge
+        return np.array([gamma_hedge])
 
     def observe_first(self, timestep: dm_env.TimeStep):
         pass

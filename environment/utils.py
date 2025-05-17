@@ -25,11 +25,11 @@ class Utils:
         sim_time = 1,
         t_max=None,
         beta=0.5,
-        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42, swap_spread =0.0001, test_episode_offset=50_000,test=False):
+        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42, swap_spread =0.0001, test_episode_offset=15_000,test=False, data_path=''):
         
         self.seed = seed
-
-        self.out_dir = "data/stress"
+        assert data_path, 'you must specify the name of the dataset data folder'
+        self.out_dir = f"data/{data_path}"
         #test_episode_offset = 0
         self.test_episode_offset = test_episode_offset
         self.test = test
@@ -90,8 +90,6 @@ class Utils:
             dtype=np.float32, mode='r',
             shape=(n_episodes, T1, 1, swap_dims)
         )
-        # Still load liability swap data to maintain compatibility with existing code,
-        # but we won't use it in the simplified model
         liab_swap_mm = np.memmap(
             os.path.join(data_dir, 'swap_liab.dat'),
             dtype=np.float32, mode='r',
@@ -121,6 +119,7 @@ class Utils:
             hedge_swaption_mm,
             liab_swaption_mm,
             hedge_swap_mm,
+            liab_swap_mm,
             net_direction_mm,
             cov_hed,
             cov_liab,

@@ -248,7 +248,7 @@ class MainPortfolio(AssetInterface):
         super().__init__()
         self.utils = utils
         self.dt = self.utils.dt
-        hedge_swaption, liab_swaption, hedge_swap, liab_swaption_position, self.kernel_hed_all, self.kernel_liab_all, self.ttm_mat = utils.generate_swaption_market_data()
+        hedge_swaption, liab_swaption, hedge_swap, liab_swap, liab_swaption_position, self.kernel_hed_all, self.kernel_liab_all, self.ttm_mat = utils.generate_swaption_market_data()
         
         print("initializing classes")
         self.liab_port = SwaptionLiabilityPortfolio(utils, liab_swaption, liab_swaption_position * utils.contract_size)
@@ -259,6 +259,7 @@ class MainPortfolio(AssetInterface):
 
         # Initialize with hedge swap only
         self.underlying = Swaps(hedge_swap, utils=utils)  
+        self.underlying_liab =  Swaps(liab_swap, utils=utils) # just needed for the rate
         self.kernel_beta = np.float32(1.0)  # standard deviation of the kernel
         self.use_rbf_kernel = False
         
@@ -310,8 +311,7 @@ class MainPortfolio(AssetInterface):
 
 
     def get_vega(self,t):
-        """not implemented"""
-        pass
+        return self.hed_port.get_vega(t) + self.liab_port.get_vega(t)
 
     def get_vega_local_hed(self,t):
         """portfolio vega vector at time t"""
@@ -325,7 +325,7 @@ class MainPortfolio(AssetInterface):
         """Reset all components at the beginning of episode `sim_episode`."""
         self.sim_episode = sim_episode
         self.underlying.set_path(sim_episode)
-
+        self.underlying_liab.set_path(sim_episode)
         self.hed_port.reset()
         self.hed_port.set_episode(sim_episode)
 
@@ -343,22 +343,24 @@ class MainPortfolio(AssetInterface):
 
     def get_state(self, t: int) -> np.ndarray:
         rate_hed = self.underlying.get_rate_hed(t)
+        rate_liab = self.underlying_liab.get_rate_hed(t)
         gamma_unit_hed = self.hed_port._base_options[t, t, Greek.GAMMA]
-        vega_unit_hed = self.hed_port._base_options[t, t, Greek.VEGA]
         gamma_port = self.get_gamma_local_hed(t)
         ttm = self.get_ttm_vec(t)[0]
 
-        rate_hed_norm = (rate_hed-0.049410736630389)/0.021853509133030684
-        gamma_unit_hed_norm = (gamma_unit_hed-100.24665011579833)/34.4581512751502 
-        vega_unit_hed_norm = (vega_unit_hed-0.06960121180382274)/0.02639701598496658 
-        gamma_ratio = gamma_port/(gamma_unit_hed *self.utils.contract_size*10) 
-        hed_cost_norm = (self.hed_port._base_options[t, t, Greek.PRICE] - 0.029336627342784773)/0.008991963191476743  * self.utils.spread*100
-        iv_norm = (self.hed_port._base_options[t, t, Greek.IV]- 0.43473235958601)/0.11112382868869143 
-        state_raw = np.array([rate_hed_norm, hed_cost_norm, vega_unit_hed_norm, gamma_ratio, gamma_unit_hed_norm,iv_norm, (ttm-0.875)/0.0710151491007036])
+        rate_hed_norm = rate_hed*100
+        rate_liab_norm = rate_liab*100
+        gamma_unit_hed_norm = gamma_unit_hed/140
+        gamma_ratio = np.abs(gamma_port)/(gamma_unit_hed *self.utils.contract_size) 
+        hed_cost_norm = (self.hed_port._base_options[t, t, Greek.PRICE] )  * self.utils.spread*100*100
+        iv_norm = (self.hed_port._base_options[t, t, Greek.IV])*10
+        iv_liab_norm = (self.liab_port._base_options[t, t, Greek.IV])*10
+        ttm_norm =  (ttm)
+        state_raw = np.array([rate_hed_norm,rate_liab_norm, hed_cost_norm, gamma_ratio, gamma_unit_hed_norm,iv_norm,iv_liab_norm,ttm_norm, np.sign(gamma_port)])
         return state_raw.astype(np.float32)
 
     def get_kernel_greek_risk(self, t):
-        return self.get_gamma_local_hed(t), self.get_delta_local_hed(t)
+        return self.get_gamma(t), self.get_gamma_local_hed(t), self.get_delta_local_hed(t), self.get_vega(t)
 
     def solve_delta_action(self, t):
         """

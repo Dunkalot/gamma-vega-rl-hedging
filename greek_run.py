@@ -17,22 +17,11 @@ from absl import flags
 FLAGS = flags.FLAGS
 
 flags.DEFINE_integer('eval_sim', 5_000, 'evaluation episodes (Default 40_000)')
-flags.DEFINE_integer('init_ttm', 60, 'number of days in one episode (Default 60)')
-flags.DEFINE_float('mu', 0.0, 'spot drift (Default 0.2)')
-flags.DEFINE_float('init_vol', 0.2, 'initial spot vol (Default 0.2)')
-flags.DEFINE_float('poisson_rate', 1.0, 'possion rate of new optiosn in liability portfolio (Default 1.0)')
-flags.DEFINE_float('moneyness_mean', 1.0, 'new optiosn moneyness mean (Default 1.0)')
-flags.DEFINE_float('moneyness_std', 0.0, 'new optiosn moneyness std (Default 0.0)')
 flags.DEFINE_float('spread', 0.005, 'Hedging transaction cost (Default 0.0)')
 flags.DEFINE_string('strategy', 'delta', 'Hedging strategy opt: delta / gamma/ vega (Default delta')
-flags.DEFINE_float('vov', 0.0, 'Vol of vol, zero means BSM; non-zero means SABR (Default 0.0)')
-flags.DEFINE_list('liab_ttms',['60',], 'List of maturities selected for new adding option (Default [60,])')
-flags.DEFINE_integer('hed_ttm', 20, 'Hedging option maturity in days (Default 20)')
-flags.DEFINE_string('logger_prefix', '', 'Prefix folder for logger (Default None)')
-flags.DEFINE_boolean('vega_obs', False, 'Include portfolio vega and hedging option vega in state variables (Default False)')
-flags.DEFINE_boolean('gbm', False, 'GBM (Default False)')
-flags.DEFINE_boolean('sabr', False, 'SABR (Default False)')
-
+flags.DEFINE_string('run_tag','',"unique tag for run")
+flags.DEFINE_integer('eval_offset',0, 'idx offset in the eval dataset')
+flags.DEFINE_string('dataset','',"name of dataset in the data folder")
 
     
     
@@ -76,9 +65,8 @@ def make_environment(utils,log_bef=None, log_af=None, logger = None) -> dm_env.E
 def main(argv):
     gamma_hedge_ratio = 1.0
     
-    work_folder = f'greekhedge_spread={FLAGS.spread}/test/{FLAGS.strategy}'
-    if FLAGS.logger_prefix:
-        work_folder = FLAGS.logger_prefix + "/" + work_folder
+    work_folder = f'greek_baseline/{FLAGS.strategy}/{FLAGS.dataset}/{FLAGS.spread}/run_{FLAGS.run_tag}'
+    
     # Create an environment, grab the spec, and use it to create networks.
     # eval_utils = Utils(init_ttm=FLAGS.init_ttm, np_seed=4321, num_sim=FLAGS.eval_sim, spread=FLAGS.spread, volvol=FLAGS.vov, sabr=FLAGS.sabr, gbm=FLAGS.gbm, hed_ttm=FLAGS.hed_ttm,
     #                    init_vol=FLAGS.init_vol, poisson_rate=FLAGS.poisson_rate, 
@@ -87,11 +75,16 @@ def main(argv):
     eva_logfunc = EvalLog()
     eval_log_bef = eva_logfunc._log_before
     eval_log_af = eva_logfunc._log_after
-    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread, test_episode_offset=0, test=True)
+    eval_utils = Utils(n_episodes=FLAGS.eval_sim, tenor=4, spread=FLAGS.spread, test_episode_offset=FLAGS.eval_offset, test=True, data_path=FLAGS.dataset)
     eval_env = make_environment(utils=eval_utils,log_bef = eval_log_bef, log_af = eval_log_af, logger=make_logger(work_folder,'eval_env'))
     # Create the evaluation actor and loop.
-
-    if FLAGS.strategy == 'gamma':
+    if FLAGS.strategy == 'gamma_risk_limit':
+        # gamma hedging
+        #eval_env = make_environment(utils=eval_utils, logger=make_logger(work_folder, f'eval_gamma_env'))
+        eval_actor = GammaHedgeAgent(eval_env, gamma_hedge_ratio, risk_limit=True)
+        eval_loop = acme.EnvironmentLoop(eval_env, eval_actor, label='eval_loop', logger=make_logger(work_folder, f'eval_gamma_loop',True))
+        eval_loop.run(num_episodes=FLAGS.eval_sim)
+    elif FLAGS.strategy == 'gamma':
         # gamma hedging
         #eval_env = make_environment(utils=eval_utils, logger=make_logger(work_folder, f'eval_gamma_env'))
         eval_actor = GammaHedgeAgent(eval_env, gamma_hedge_ratio)

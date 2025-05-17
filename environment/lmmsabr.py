@@ -333,7 +333,7 @@ def sample_phi_diag_mvn(
 ):
     # rho for sabr rho not the matrix rho
     T = np.asarray(T, dtype=float)
-    return rho_inf + (rho0 - rho_inf) * np.exp(-T / Tc)
+    return (rho_inf - (rho0 - rho_inf) * np.exp(-T / Tc))[::-1]
 
 
 def build_phi_matrix(T, phi_diag, lambda3, lambda4):
@@ -548,7 +548,7 @@ def create_df_init(df_fwd, df_raw_spot, resolution, tau=0.5):
 
 
 
-def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolated=None, g_func=None, interp_vol = False, zcb_interp = False,g_mat_supp=None):
+def interp_func_fac(df_init, resolution=2, tau=0.5, beta=0.5, rho_mat_interpolated=None, interp_vol = False, zcb_interp = False,g_mat_supp=None):
     df = df_init
     #fwd = df['Forward'].values # only used for test, not to be uncommented
 
@@ -979,18 +979,17 @@ class LMMSABR:
         sim_time = 1,
         t_max=None,
         beta=0.5,
-        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2,sub_steps=None
+        swap_hedge_expiry=1, swap_client_expiry=2,sub_steps=None
         
         
     ):
-        
+        self.regime_stress=False
         self.imm = imm
         self.samples = None
         self.tau = tau
         self.resolution = resolution
         self.dt = tau / resolution
         self.beta = beta
-        self.B = B
         self.sim_time = sim_time
         self.primed = False
         self.cov_big = False
@@ -1056,8 +1055,10 @@ class LMMSABR:
         rho_kwargs={'eta_range':(0.0,0.0), 'lambda_range':( 0.0121, 0.0121)},
         theta_kwargs={'eta_range':(0.0,0.0), 'lambda_range':( 0.0121, 0.0121)},
         phi_kwargs={'lambda3_range': (0.0087931,0.0087931), 'lambda4_range': (0.0051319,0.0051319), 'phi_short':-0.6, 'phi_long':-0.5},
-        g_kwargs={'params':(-0.013,0.0287,0.5272,0.0268)},
-        h_kwargs={'params':(0.5727,0.0002,2.3035,0.2757)},
+        g_calm={'params':(-0.013,0.0287,0.5272,0.0268)},
+        h_calm={'params':(0.5727,0.0002,2.3035,0.2757)},
+        g_stressed= {'params':(0.0406,0.1538,1.2447,0.0202)},
+        h_stressed= {'params':(1.1138, 0.0002,1.9833,0.3069)},
         fwd_kwargs=None,
         seed=None,
     ):
@@ -1079,16 +1080,15 @@ class LMMSABR:
         rho_kwargs = rho_kwargs or {}
         theta_kwargs = theta_kwargs or {}
         phi_kwargs = phi_kwargs or {}
-        g_kwargs = g_kwargs or {}
-        h_kwargs = h_kwargs or {}
+        g_calm = g_calm or {}
+        h_calm = h_calm or {}
         fwd_kwargs = fwd_kwargs or {}
         
         self.df_fwd = df_fwd
         rho_batch, rho_meta = sample_exponential_corr_matrix_batch(T, n_samples, **rho_kwargs)
         theta_batch, theta_meta = sample_exponential_corr_matrix_batch(T, n_samples, **theta_kwargs)
         phi_batch, phi_meta = sample_phi_matrix_batch(T, n_samples, **phi_kwargs)
-        g_params, _ = sample_positive_rebonato_params(n_samples=n_samples, seed=seed, **g_kwargs)
-        h_params, _ = sample_positive_rebonato_params(n_samples=n_samples, volvol=True, seed=seed, **h_kwargs)
+        
         if n_curves == None:
             print(f"n_curves is none, setting n_curves to {n_samples=}")
             n_curves = n_samples
@@ -1106,8 +1106,10 @@ class LMMSABR:
                 "rho_mat": rho_batch[i],
                 "theta_mat": theta_batch[i],
                 "phi_mat": phi_batch[i],
-                "g_params": g_params[i],
-                "h_params": h_params[i],
+                "g_params_calm": g_calm['params'],
+                "h_params_calm": h_calm['params'],
+                "g_params_stressed": g_stressed['params'],
+                "h_params_stressed": h_stressed['params'],
                 "df_init": self.df_init_list[i],
                 "meta": {
                     "rho_meta": rho_meta[i],
@@ -1154,7 +1156,30 @@ class LMMSABR:
         print("\nSampled Stress Levels:")
         print(stress_counts.to_string())
 
-    
+
+    def switch_regime(self, stressed=False):
+        """updated the volatility term structure. Might also change more in the future."""
+        if stressed:
+            self.g_mat = self.g_mat_stressed
+            self.h_mat = self.h_mat_stressed
+            self.gg_tensor = self.gg_tensor_stressed
+            self.ggh_tensor = self.ggh_tensor_stressed
+            self.regime_stress = stressed
+        else:
+            self.g_mat = self.g_mat_calm
+            self.h_mat = self.h_mat_calm
+            self.gg_tensor = self.gg_tensor_calm
+            self.ggh_tensor = self.ggh_tensor_calm
+            self.regime_stress = stressed
+
+    def build_terminal_vol_terms(self, g_params, h_params):
+        print(h_params)
+        g_func = partial(get_instant_vol_func, params=g_params)
+        h_func = partial(get_instant_vol_func, params=h_params)
+        h_mat = h_func(self.ttm_mat)
+        g_mat = g_func(self.ttm_mat)
+        return g_mat, h_mat
+
     def prime(self, sample_idx=0):
         if self.samples is None:
             raise ValueError("You must call sample_starting_conditions() first.")
@@ -1168,20 +1193,23 @@ class LMMSABR:
         self.rho_mat = sample["rho_mat"]
         self.theta_mat = sample["theta_mat"]
         self.phi_mat = sample["phi_mat"]
-        self.g_params = sample["g_params"]
-        self.h_params = sample["h_params"]
+        self.g_params_calm = sample["g_params_calm"]
+        self.h_params_calm = sample["h_params_calm"]
+        self.h_params_stressed = sample["h_params_stressed"]
+        self.g_params_stressed = sample["g_params_stressed"]
         self.df_init = sample["df_init"]
-        self.g = partial(get_instant_vol_func, params=self.g_params)
-        self.h = partial(get_instant_vol_func, params=self.h_params)
-        #self.interpolate_corr_matrices()
-        self.precompute_instant_vol()
-        self.prepare_curves()
+        
+        self.g_mat_calm, self.h_mat_calm = self.build_terminal_vol_terms(self.g_params_calm, self.h_params_calm)
+        self.g_mat_stressed, self.h_mat_stressed = self.build_terminal_vol_terms(self.g_params_stressed, self.h_params_stressed)
+        self.gg_tensor_calm, self.ggh_tensor_calm = self.precompute_gg_and_ggh_tensor(g_mat=self.g_mat_calm, h_mat=self.h_mat_calm)
+        self.gg_tensor_stressed, self.ggh_tensor_stressed = self.precompute_gg_and_ggh_tensor(g_mat=self.g_mat_stressed, h_mat=self.h_mat_stressed)
+        self.switch_regime(self.regime_stress)
         self.rho_tensor = self.build_swap_correlation_tensor(self.rho_mat)
         self.theta_tensor = self.build_swap_correlation_tensor(self.theta_mat)
         self.phi_tensor = self.build_swap_correlation_tensor(self.phi_mat)
-        self.gg_tensor, self.ggh_tensor = self.precompute_gg_and_ggh_tensor()
+        self.prepare_curves()
         self.primed = True
-        
+       
     def get_sample_meta(self, sample_idx=0):
         if self.samples is None:
             raise ValueError("No samples loaded.")
@@ -1220,7 +1248,7 @@ class LMMSABR:
 
 
 
-    def precompute_gg_and_ggh_tensor(self):
+    def precompute_gg_and_ggh_tensor(self, g_mat, h_mat):
         """  
         Precompute gg_tensor and ggh_tensor over the swap-tenor grid using memoization.
 
@@ -1238,8 +1266,8 @@ class LMMSABR:
         T_arr_swap = self.swap_indices[1][0][:,0]
         cache = {}  # (delta_T_idx, delta_i, delta_j) → float
         cache_ggh = {}
-        g_vec = self.g_mat[0] # max expiry in steps
-        h_vec = self.h_mat[0]
+        g_vec = g_mat[0] # max expiry in steps
+        h_vec = h_mat[0]
         if self.imm:
             T_arr_swap = [self.swap_hedge_expiry_idx,self.swap_liab_expiry_idx]
         for i_t, t_idx in enumerate(t_arr_swap):
@@ -1309,25 +1337,11 @@ class LMMSABR:
             resolution=self.resolution,
             tau=self.tau,
             rho_mat_interpolated=self.rho_mat,
-            g_func=self.g,
             interp_vol=True if not self.imm else False,
             zcb_interp=True,beta=1,
             g_mat_supp=self.g_mat
         )
 
-
-    def precompute_instant_vol(self):
-        
-
-        self.h_mat = self.h(self.ttm_mat)
-        self.g_mat = self.g(self.ttm_mat)
-
-
-    def interpolate_corr_matrices(self):
-        print("interpolating. the corr matrices are currently", self.rho_mat.shape)
-        self.rho_mat_interp = interpolate_correlation_matrix_cv(self.rho_mat, self.resolution)
-        self.theta_mat_0m_interpolated = interpolate_correlation_matrix_cv(self.theta_mat, self.resolution)
-        self.phi_mat_0m_interpolated = interpolate_correlation_matrix_cv(self.phi_mat, self.resolution)
 
     
     def simulate_forwards(self, seed=None, minimum_starting_rate=0.01):
@@ -1378,7 +1392,8 @@ class LMMSABR:
         ids_short   = ids // self.resolution
         rev_idx     = ids[::-1].tolist()
         rev_short   = ids_short[::-1].tolist()
-        
+
+
         self.f_sim, self.k_mat = _simulate_core(
             f_sim=self.f_sim, 
             k_mat=self.k_mat, 
@@ -1411,7 +1426,7 @@ class LMMSABR:
 
         
 
-    def simulate(self, shuffle_df=True,seed=None,minimum_starting_rate=0.01):
+    def simulate(self, shuffle_df=True,seed=None,minimum_starting_rate=0.01,stressed_regime=False):
         """use more substeps in more volatilie regimes.
         Signs there are too few substeps are rates reaching the 0 absorbing boundary often. 
         plot f_sim to check."""
@@ -1462,7 +1477,7 @@ class LMMSABR:
 
         # weights for Sigma_0 for the SABR parameter creation
         swap_lvl      = swap_paths[:, :, None]     # (t, swap, 1)
-        W_dynamic     = w_t * (fwd_subsets**self.beta) / (swap_lvl**self.B)
+        W_dynamic     = w_t * (fwd_subsets**self.beta) / (swap_lvl**self.beta)
 
         #  store & return the valid slice -----------------------------------
         self.swap_sim = swap_paths
@@ -1477,12 +1492,13 @@ class LMMSABR:
         # ==========================================================
         #          Create tensors for the SABR parameters
         # ==========================================================
-        
+
+
         swap_idxs_0 = self.swap_idxs[0]
         swap_idxs_1 = self.swap_idxs[1]
         k_tensor = self.swap_indexer(self.k_mat)[:,[hed_idx, liab_idx]]
         ggh_tensor = self.ggh_tensor[:,[hed_idx, liab_idx]]
-
+        gg_tensor  =  self.gg_tensor[:,[hed_idx, liab_idx]]
         rho_tensor = self.rho_tensor[:,[hed_idx, liab_idx]]
         theta_tensor = self.theta_tensor[:,[hed_idx, liab_idx]]
         phi_tensor = self.phi_tensor[:,[hed_idx, liab_idx]]
@@ -1496,7 +1512,7 @@ class LMMSABR:
         #               compute sigma tensor
         # ==========================================================
         #print(f"theta_tensor shape: {theta_tensor.shape}, k_tensor shape: {k_tensor.shape}, rho_tensor shape: {rho_tensor.shape}, W_tensor_prod shape: {W_tensor_prod.shape}, G_tensor shape: {self.G_tensor.shape}")
-        prod = rho_tensor*W_tensor_prod*k_tensor_prod*self.gg_tensor[:,[hed_idx, liab_idx]]
+        prod = rho_tensor*W_tensor_prod*k_tensor_prod*gg_tensor
 
         numerator = np.sum(prod, axis=(2, 3))
 
@@ -1919,7 +1935,6 @@ class LMMSABR:
         # unpack the [T,2,F] swap‐pair array
         pairs = self.swap_indices[1]    # shape [T, 2, F]
         i0, i1 = pairs[:,0], pairs[:,1]  # each shape [T, F]
-
         # instantaneous vols & weights
         inst_vol   = (self.swap_indexer(self.f_sim**self.beta)
                     * self.swap_indexer(self.k_mat)
@@ -2077,6 +2092,8 @@ class LMMSABR:
         n_episodes: int = 1000,
         poisson_rate: float = 1.0,
         block: int = 1000,
+        max_stress_prob=0,
+        min_stress_prob=0,
         out_dir: str = "data/swaption_memmap"
     ) -> str:
         """
@@ -2089,6 +2106,7 @@ class LMMSABR:
         assert self.primed, "You must call prime() before generating episodes."
         #assert len(self.df_init_list) > 10, "you need a diverse set of starting curves"
         # 1) sample one episode to get per-episode shapes
+        full_p = np.linspace(min_stress_prob, max_stress_prob, n_episodes)
         self.simulate(seed=0)
         self.get_swap_matrix()
         (h0_sh, h0_sw), (l0_sh, l0_sw) = self.get_sabr_params_imm()
@@ -2124,11 +2142,14 @@ class LMMSABR:
                           desc="Generating episode blocks",
                           unit="block"):
             b = min(block, n_episodes - start)
-
+            rng = np.random.default_rng(seed=start)
+            p_block = full_p[start : start + b]
+            draws = rng.binomial(n=1,p=p_block, size=b).astype(bool)
+                
             # generate net_direction for this block
-            pd = np.random.poisson(lam=poisson_rate, size=(b, T))[:, None, :]
-            num_pos = np.random.binomial(pd, 0.5)
-            nd_block = 2 * num_pos - pd
+            poisson_dist = rng.poisson(lam=poisson_rate, size=(b, T))[:, None, :]
+            num_pos = rng.binomial(n=poisson_dist, p=0.5)
+            nd_block = 2 * num_pos - poisson_dist
             iu = np.triu_indices(T, k=1)
             nd_block = np.tile(nd_block, (1, T, 1))
             nd_block[:, iu[0], iu[1]] = 0
@@ -2145,6 +2166,9 @@ class LMMSABR:
             # fill buffers
             for i in range(b):
                 ep_idx = start + i
+                
+                stress_bool: bool = draws[i]
+                self.switch_regime(stressed=stress_bool)
                 self.simulate(seed=ep_idx)
                 self.get_swap_matrix()
                 (h_sh, h_sw), (l_sh, l_sw) = self.get_sabr_params_imm()
