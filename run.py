@@ -101,8 +101,8 @@ def make_environment(utils,log_bef=None, log_af=None, logger = None) -> dm_env.E
 
 def make_quantile_networks(
     action_spec: specs.BoundedArray,
-    policy_layer_sizes: Sequence[int] = (32, 32,32),
-    critic_layer_sizes: Sequence[int] =  (64,64, 64),
+    policy_layer_sizes: Sequence[int] = (64,64),
+    critic_layer_sizes: Sequence[int] =  (128,128),
     quantile_interval: float = 0.01, 
     ) -> Mapping[str, types.TensorTransformation]:
     """Creates the networks used by the agent."""
@@ -241,8 +241,8 @@ def main(argv):
         checkpoint=False,
         logger=loggers['learner'],
         batch_size=FLAGS.batch_size,
-        policy_optimizer=snt.optimizers.Adam(5e-4),
-        critic_optimizer=snt.optimizers.Adam(5e-4),
+        policy_optimizer=snt.optimizers.Adam(1e-4),
+        critic_optimizer=snt.optimizers.Adam(5e-5),
         annealer_steps = 200000*6
     )
 

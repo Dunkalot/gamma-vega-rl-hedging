@@ -59,11 +59,11 @@ class StepResult:
     hed_cost_norm: float = 0.0
     gamma_unit_norm: float = 0.0
     vega_unit_norm: float = 0.0
-    gamma_ratio: float = 0.0
+    gamma_port_norm: float = 0.0
+    vega_port_norm: float = 0.0
     iv_norm: float = 0.0
     iv_liab_norm: float = 0.0
     ttm: float = 0.0
-    gamma_port_sign: int = 0
 
 class TrainLog:
     @staticmethod
@@ -76,14 +76,14 @@ class EvalLog:
     @staticmethod
     def _log_before(self, result:StepResult,t):
         
-            result.gamma_before ,result.gamma_local_hed_before, result.delta_local_hed_before, result.vega_before, = self.portfolio.get_kernel_greek_risk(t)
+            result.gamma_before ,result.gamma_local_hed_before, result.delta_local_hed_before, result.vega_before, result.vega_local_hed_before = self.portfolio.get_kernel_greek_risk(t)
             result.delta_before = self.portfolio.get_delta(self.t)
             result.gamma_hed_before = self.portfolio.hed_port.get_gamma(t)
             result.gamma_liab_before = self.portfolio.liab_port.get_gamma(t)
     @staticmethod
     def _log_after(self, result:StepResult,t):
 
-        result.gamma_after,result.gamma_local_hed_after, result.delta_local_hed_after,  result.vega_after = self.portfolio.get_kernel_greek_risk(t)
+        result.gamma_after,result.gamma_local_hed_after, result.delta_local_hed_after,  result.vega_after, result.vega_local_hed_after = self.portfolio.get_kernel_greek_risk(t)
         result.delta_after = self.portfolio.get_delta(self.t) # portfolio delta
         result.gamma_hed_after = self.portfolio.hed_port.get_gamma(t)
         result.gamma_liab_after = self.portfolio.liab_port.get_gamma(t)
@@ -129,7 +129,7 @@ class TradingEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf,    
             high=+np.inf,
-            shape=(9,),
+            shape=(10,),
             dtype=np.float32
         )
 
@@ -168,18 +168,22 @@ class TradingEnv(gym.Env):
         profit and loss period reward
         """
         t = self.t
-        action = action[0]*1.5
+        action = action[0]
         result = StepResult( episode=self.sim_episode, t=t)
 
         result.action_gamma = action
         self.actions[t] = action
         # gamma to notional 
-        result.action_swaption = -action*self.portfolio.get_gamma_local_hed(t)/(
+        gamma_bound =  -self.portfolio.get_gamma_local_hed(t)/(
             self.portfolio.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size)
-        
+        vega_bound = -self.portfolio.get_vega_local_hed(t)/(
+            self.portfolio.hed_port._base_options[t,t,Greek.VEGA] * self.utils.contract_size)
+        bounds = [0, gamma_bound, vega_bound]
+        high = np.max(bounds)
+        low = np.min(bounds)
 
+        result.action_swaption = low + action * (high - low)
         assert not np.isnan(action).any(), action
-        
         #if self.logger: # dont waste resources
         self.log_bef(self,result,t) 
         result.step_pnl = reward = self.portfolio.step(
@@ -192,7 +196,7 @@ class TradingEnv(gym.Env):
         self.t = self.t + 1
 
         state = self.portfolio.get_state(self.t)
-        result.rate_norm, result.rate_liab_norm, result.hed_cost_norm, result.gamma_ratio, result.gamma_unit_norm, result.iv_norm, result.iv_liab_norm, result.ttm, result.gamma_port_sign = state
+        result.rate_norm, result.rate_liab_norm, result.hed_cost_norm, result.gamma_unit_norm, result.gamma_port_norm, result.vega_unit_norm, result.vega_port_norm, result.iv_norm, result.iv_liab_norm, result.ttm= state
         if self.t == self.num_period-1:
             done = True
             #state[[2,3,4]] = 0 # swaptions doesnt expire at episode end, so greeks say. 

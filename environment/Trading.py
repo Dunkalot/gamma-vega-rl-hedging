@@ -248,7 +248,7 @@ class MainPortfolio(AssetInterface):
         super().__init__()
         self.utils = utils
         self.dt = self.utils.dt
-        hedge_swaption, liab_swaption, hedge_swap, liab_swap, liab_swaption_position, self.kernel_hed_all, self.kernel_liab_all, self.ttm_mat = utils.generate_swaption_market_data()
+        hedge_swaption, liab_swaption, hedge_swap, liab_swap, liab_swaption_position, self.kernel_hed_all, self.kernel_vol_all, self.ttm_mat = utils.generate_swaption_market_data()
         
         print("initializing classes")
         self.liab_port = SwaptionLiabilityPortfolio(utils, liab_swaption, liab_swaption_position * utils.contract_size)
@@ -271,9 +271,9 @@ class MainPortfolio(AssetInterface):
         """regression weights wrt hedging asset"""
         return self.kernel_hed[t]
     
-    def kernel_coef_liab(self, t):
+    def kernel_coef_vol(self, t):
         """regression weights wrt liability asset"""
-        return self.kernel_liab[t]
+        return self.kernel_vol[t]
 
     def get_ttm_vec(self, t):
         return self.ttm_mat[t]
@@ -315,8 +315,8 @@ class MainPortfolio(AssetInterface):
 
     def get_vega_local_hed(self,t):
         """portfolio vega vector at time t"""
-        swaption_vega = np.concatenate([self.hed_port.get_vega_vec(t), self.liab_port.get_vega_vec(t)])
-        return swaption_vega
+        swaption_vega = np.array([self.hed_port.get_vega(t), self.liab_port.get_vega(t)])
+        return np.inner(self.kernel_coef_vol(t),swaption_vega)
 
 
 
@@ -333,34 +333,33 @@ class MainPortfolio(AssetInterface):
         self.liab_port.set_episode_liab(sim_episode)
         # prime the delta vector
         self.kernel_hed = self.kernel_hed_all[sim_episode]
-        self.kernel_liab = self.kernel_liab_all[sim_episode]
+        self.kernel_vol = self.kernel_vol_all[sim_episode]
         T = len(self.kernel_hed)
         
         # Transform kernel_hed
         self.kernel_hed = np.concatenate((np.ones_like(self.kernel_hed), self.kernel_hed), axis=1)
+        self.kernel_vol = np.concatenate((np.ones_like(self.kernel_vol), self.kernel_vol), axis=1)
         np.set_printoptions(precision=10, suppress=True)
         np.set_printoptions(threshold=np.inf, linewidth=np.inf)
 
     def get_state(self, t: int) -> np.ndarray:
-        rate_hed = self.underlying.get_rate_hed(t)
-        rate_liab = self.underlying_liab.get_rate_hed(t)
-        gamma_unit_hed = self.hed_port._base_options[t, t, Greek.GAMMA]
-        gamma_port = self.get_gamma_local_hed(t)
+        rate_hed = self.underlying.get_rate_hed(t)*300
+        rate_liab = self.underlying_liab.get_rate_hed(t)*300
+        gamma_unit_hed = self.hed_port._base_options[t, t, Greek.GAMMA]/14
+        vega_unit_hed = self.hed_port._base_options[t, t, Greek.VEGA] / 0.006
+        gamma_port = self.get_gamma_local_hed(t) /85000
+        vega_port = self.get_vega_local_hed(t)/40
         ttm = self.get_ttm_vec(t)[0]
 
-        rate_hed_norm = rate_hed*100
-        rate_liab_norm = rate_liab*100
-        gamma_unit_hed_norm = gamma_unit_hed/140
-        gamma_ratio = np.abs(gamma_port)/(gamma_unit_hed *self.utils.contract_size) 
-        hed_cost_norm = (self.hed_port._base_options[t, t, Greek.PRICE] )  * self.utils.spread*100*100
-        iv_norm = (self.hed_port._base_options[t, t, Greek.IV])*10
-        iv_liab_norm = (self.liab_port._base_options[t, t, Greek.IV])*10
-        ttm_norm =  (ttm)
-        state_raw = np.array([rate_hed_norm,rate_liab_norm, hed_cost_norm, gamma_ratio, gamma_unit_hed_norm,iv_norm,iv_liab_norm,ttm_norm, np.sign(gamma_port)])
+        hed_cost = (self.hed_port._base_options[t, t, Greek.PRICE] )  * self.utils.spread*100*100*10
+        iv_norm = (self.hed_port._base_options[t, t, Greek.IV])*25
+        iv_liab_norm = (self.liab_port._base_options[t, t, Greek.IV])*25
+        ttm_norm =  ttm*14
+        state_raw = np.array([rate_hed,rate_liab, hed_cost, gamma_unit_hed, gamma_port, vega_unit_hed, vega_port, iv_norm, iv_liab_norm,ttm_norm])
         return state_raw.astype(np.float32)
 
     def get_kernel_greek_risk(self, t):
-        return self.get_gamma(t), self.get_gamma_local_hed(t), self.get_delta_local_hed(t), self.get_vega(t)
+        return self.get_gamma(t), self.get_gamma_local_hed(t), self.get_delta_local_hed(t), self.get_vega(t), self.get_vega_local_hed(t)
 
     def solve_delta_action(self, t):
         """

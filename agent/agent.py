@@ -18,7 +18,7 @@
 import copy
 import dataclasses
 from typing import Iterator, List, Optional, Tuple
-
+from environment.Trading import Greek
 from acme import adders
 from acme import core
 from acme import datasets
@@ -403,32 +403,26 @@ class VegaHedgeAgent(core.Actor):
     This is the Delta-Vega Agent implementation. 
     Output: Hedging Actions - Alpha, computed analytically following the alpha approach defined in the paper.
     '''
-    def __init__(self, running_env) -> None:
+    def __init__(self, running_env, hedge_ratio = 1.0) -> None:
+        self.hedge_ratio = hedge_ratio
         self.env = running_env
+        self.utils = running_env.utils
         super().__init__()
     
     def select_action(self, observation: types.NestedArray) -> types.NestedArray:
-        episode = self.env.sim_episode
         t = self.env.t
-        current_vega = observation[3]
-        hedge_option = self.env.portfolio.hed_port.options[episode,t]
-        hed_share = -current_vega/hedge_option.vega_path[t]/self.env.portfolio.utils.contract_size
-        # action constraints
-        gamma_action_bound = -self.env.portfolio.get_gamma(t)/self.env.portfolio.hed_port.options[episode, t].gamma_path[t]/self.env.portfolio.utils.contract_size
-        action_low = [0, gamma_action_bound]
-        action_high = [0, gamma_action_bound]
         
-        if FLAGS.vega_obs:
-            # vega bounds
-            vega_action_bound = -self.env.portfolio.get_vega(t)/self.env.portfolio.hed_port.options[episode, t].vega_path[t]/self.env.portfolio.utils.contract_size
-            action_low.append(vega_action_bound)
-            action_high.append(vega_action_bound)
-
-        low_val = np.min(action_low)
-        high_val = np.max(action_high)
-
-        alpha = (hed_share - low_val)/(high_val - low_val)
+        gamma_bound =  -self.env.portfolio.get_gamma_local_hed(t)/(
+            self.env.portfolio.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size)
         
+        vega_bound = -self.env.portfolio.get_vega_local_hed(t)/(
+            self.env.portfolio.hed_port._base_options[t,t,Greek.VEGA] * self.utils.contract_size)
+        
+        bounds = [0, gamma_bound, vega_bound]
+        high = np.max(bounds)
+        low = np.min(bounds)
+        
+        alpha = (self.hedge_ratio * vega_bound - low) / (high - low+1e-11)
         return np.array([alpha])
 
     def observe_first(self, timestep: dm_env.TimeStep):
@@ -446,39 +440,27 @@ class GammaHedgeAgent(core.Actor):
     Output: Hedging Actions - Alpha, computed analytically following the alpha approach defined in the paper.
     """
     def __init__(self, running_env, hedge_ratio=1.0, risk_limit=False) -> None:
-        self.env = running_env
         self.hedge_ratio = hedge_ratio
-        self.risk_limit = risk_limit
+        self.env = running_env
+        self.utils = running_env.utils
+        
         super().__init__()
     
     def select_action(self, observation: types.NestedArray) -> types.NestedArray:
-        episode = self.env.sim_episode
         t = self.env.t
-        current_gamma = observation[2] * observation[3] * 1000
-        
-        hedge_gamma = self.hedge_ratio*current_gamma
-        #hedge_option = self.env.portfolio.hed_port.options[episode,t]
-        #hed_share = -hedge_gamma#/hedge_option.gamma_path[t]/self.env.portfolio.utils.contract_size
-        # action constraints
-        #gamma_action_bound = -self.env.portfolio.get_gamma(t)/self.env.portfolio.hed_port.options[episode, t].gamma_path[t]/self.env.portfolio.utils.contract_size
-        #action_low = [0, gamma_action_bound]
-        #action_high = [0, gamma_action_bound]
-        
-        #if FLAGS.vega_obs:
-        #    # vega bounds
-        #    vega_action_bound = -self.env.portfolio.get_vega(t)/self.env.portfolio.hed_port.options[episode, t].vega_path[t]/self.env.portfolio.utils.contract_size
-        #    action_low.append(vega_action_bound)
-        #    action_high.append(vega_action_bound)
 
-        #low_val = np.min(action_low)
-        #high_val = np.max(action_high)
-
-        #alpha = (hed_share - low_val)/(high_val - low_val)
-        gamma_hedge = self.hedge_ratio
-        gamma_risk_limit = 0.1*73837650
-        if self.risk_limit:
-            gamma_hedge = 0 if current_gamma <= gamma_risk_limit else gamma_hedge
-        return np.array([gamma_hedge])
+        gamma_bound =  -self.env.portfolio.get_gamma_local_hed(t)/(
+            self.env.portfolio.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size)
+        
+        vega_bound = -self.env.portfolio.get_vega_local_hed(t)/(
+            self.env.portfolio.hed_port._base_options[t,t,Greek.VEGA] * self.utils.contract_size)
+        
+        bounds = [0, gamma_bound, vega_bound]
+        high = np.max(bounds)
+        low = np.min(bounds)
+        
+        alpha = (self.hedge_ratio * gamma_bound - low) / (high - low+1e-11)
+        return np.array([alpha])
 
     def observe_first(self, timestep: dm_env.TimeStep):
         pass
@@ -497,11 +479,12 @@ class DeltaHedgeAgent(core.Actor):
     def __init__(self,running_env, hedge_ratio=1.0) -> None:
         self.env = running_env
         self.hedge_ratio = hedge_ratio
+        self.utils = running_env.utils
         super().__init__()
     
     def select_action(self, observation: types.NestedArray) -> types.NestedArray:
         # episode = self.env.sim_episode
-        # t = self.env.t
+        t = self.env.t
         
         # hed_share = 0
         # # action constraints
@@ -518,9 +501,17 @@ class DeltaHedgeAgent(core.Actor):
         # low_val = np.min(action_low)
         # high_val = np.max(action_high)
 
-        # alpha = (hed_share - low_val)/(high_val - low_val)
-        
-        return np.array([0])
+        # alpha = (hed_share - low_val)/(high_val - low_val)¨
+        action = 0
+        gamma_bound =  -self.env.portfolio.get_gamma_local_hed(t)/(
+            self.env.portfolio.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size)
+        vega_bound = -self.env.portfolio.get_vega_local_hed(t)/(
+            self.env.portfolio.hed_port._base_options[t,t,Greek.VEGA] * self.utils.contract_size)
+        bounds = [0, gamma_bound, vega_bound]
+        high = np.max(bounds)
+        low = np.min(bounds)
+        alpha = (action - low)/ (high - low+1e-11)
+        return np.array([alpha])
 
     def observe_first(self, timestep: dm_env.TimeStep):
         pass

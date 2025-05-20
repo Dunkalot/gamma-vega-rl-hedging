@@ -71,6 +71,7 @@ class Utils:
         swap_dims = self.swap_dims  
         # If out_dir has subdirectories, pick latest timestamp
         candidates = sorted(glob.glob(os.path.join(out_dir, '*')))
+        print(candidates)
         data_dir = candidates[-1] if os.path.isdir(candidates[-1]) else out_dir
         print("Using ", data_dir, "dataset")
         T1, T2 = swap_shape[0], swap_shape[0] # hedge and liability are split into two square matrices
@@ -100,13 +101,13 @@ class Utils:
             dtype=np.float32, mode='r',
             shape=(n_episodes, T1, T2)
         )
-        cov_hed = np.memmap(
-            os.path.join(data_dir, 'cov_hed.dat'),
+        reg_hed = np.memmap(
+            os.path.join(data_dir, 'reg_hed.dat'),
             dtype=np.float32, mode='r',
             shape=(n_episodes, T1, 1)
         )
-        cov_liab = np.memmap(
-            os.path.join(data_dir, 'cov_liab.dat'),
+        reg_vol_hed = np.memmap(
+            os.path.join(data_dir, 'reg_vol_hed.dat'),
             dtype=np.float32, mode='r',
             shape=(n_episodes, T1, 1)
         )
@@ -121,8 +122,8 @@ class Utils:
             hedge_swap_mm,
             liab_swap_mm,
             net_direction_mm,
-            cov_hed,
-            cov_liab,
+            reg_hed,
+            reg_vol_hed,
             ttm_mat[:,[0]]
         )
 

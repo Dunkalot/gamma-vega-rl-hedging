@@ -34,45 +34,47 @@ def _simulate_core(f_sim, k_mat, g_mat, h_mat, phi_mat, rho_mat,
                    rev_short, rev_ids, ttm_mat, beta,
                    sub_steps=1):
     
-    canon_i_diff = np.abs(rev_ids[1]-rev_ids[0])
-    for t in range((n_steps  - 1)* sub_steps):
-        
-        drift_sum = 0.0
-        for short_i, canon_i in zip(rev_short, rev_ids):
-            if ttm_mat[t // sub_steps, canon_i] + tau + 1e-8 < 0:
-                continue
+    drift_arr = np.zeros(len(rev_short))
+    dt_sub = dt / sub_steps
+    for t in range((n_steps  - 1)):
+        # anchor to real step
+        drift_arr[:] = 0
+        k_t_new = k_mat[t].copy()
+        f_t_new = f_sim[t].copy()
+        for sub_step in range(sub_steps):
+            t_sub = t*sub_steps+sub_step
+            for i, (short_i, canon_i) in enumerate(zip(rev_short, rev_ids)):
+                if ttm_mat[t, canon_i]  < 1e-9:
+                    continue
 
-            g_it = g_mat[t // sub_steps, canon_i]
-            h_it = h_mat[t // sub_steps, canon_i]
-            k_it = k_mat[t // sub_steps, canon_i]
+                g_it = g_mat[t, canon_i]
+                h_it = h_mat[t, canon_i]
+                k_it = k_t_new[canon_i]
+                f_it = f_t_new[canon_i]
+                
+                f_beta = f_it ** beta
 
-            f_t = f_sim[t // sub_steps, canon_i]
-            k_t = k_mat[t // sub_steps, canon_i]
-            f_beta = f_t ** beta
+                gkfb = g_it * k_it * f_beta
+                hk =  phi_mat[canon_i,canon_i] * h_it * k_it
+                
+                drift_sum = 0
+                for short_j, j in zip(rev_short[:i],rev_ids[:i]):
+                    drift_sum += rho_mat[canon_i,j]* drift_arr[short_j]
+                
+                drift_f = -gkfb * drift_sum
+                drift_k = -hk * drift_sum
 
-            gkfb = g_it * k_it * f_beta
-            phk = phi_mat[canon_i, canon_i] * h_it * k_it
+                df = drift_f * dt_sub + f_beta * g_it * k_it * dZ_f[t_sub, short_i]
+                dk = drift_k * dt_sub + h_it * k_it * dW_s[t_sub, short_i]
 
-            drift_f = -gkfb * drift_sum
-            drift_k = -phk * drift_sum
-
-            df = drift_f * dt + f_beta * g_it * k_it * dZ_f[t, short_i]
-            dk = drift_k * dt + h_it * k_it * dW_s[t, short_i]
-
-            f_new = f_t + df
-            k_new = k_t + dk
-
-            if t % sub_steps == 0:
-                idx = t // sub_steps + 1
-                f_sim[idx, canon_i] = f_new if f_new > 0 else 1.e-6
-                k_mat[idx, canon_i] = k_new if k_new > 0 else 1.e-6
-
-            if short_i > 0:
-                corr = rho_mat[canon_i-canon_i_diff, canon_i] * tau * gkfb / (1 + tau * f_t)
-                drift_sum += corr
+                f_t_new[canon_i] = max(f_it + df, 1.e-12)
+                k_t_new[canon_i] = max(k_it + dk, 1.e-12)
+                    
+                drift_arr[short_i] = tau * gkfb / (1 + tau * f_it) 
+        f_sim[t+1] = f_t_new
+        k_mat[t+1] = k_t_new
+                
     return f_sim, k_mat
-
-
 
 
 
@@ -1055,10 +1057,10 @@ class LMMSABR:
         rho_kwargs={'eta_range':(0.0,0.0), 'lambda_range':( 0.0121, 0.0121)},
         theta_kwargs={'eta_range':(0.0,0.0), 'lambda_range':( 0.0121, 0.0121)},
         phi_kwargs={'lambda3_range': (0.0087931,0.0087931), 'lambda4_range': (0.0051319,0.0051319), 'phi_short':-0.6, 'phi_long':-0.5},
-        g_calm={'params':(-0.013,0.0287,0.5272,0.0268)},
-        h_calm={'params':(0.5727,0.0002,2.3035,0.2757)},
-        g_stressed= {'params':(0.0406,0.1538,1.2447,0.0202)},
-        h_stressed= {'params':(1.1138, 0.0002,1.9833,0.3069)},
+        g_calm=     {'params':(-0.013, 0.0287, 0.5272, 0.0268)},
+        g_stressed= {'params':(0.0406, 0.1538, 1.2447, 0.0202)},
+        h_calm=     {'params':(0.5727, 0.0002, 2.3035, 0.2757)},
+        h_stressed= {'params':(1.1138, 0.0002, 1.9833, 0.3069)},
         fwd_kwargs=None,
         seed=None,
     ):
@@ -1443,8 +1445,8 @@ class LMMSABR:
         P = (1/(1+self.f_sim[:,:-self.resolution]*self.tau))
         P[:,0] = zcb 
 
-        P[:,self.resolution:] = np.nancumprod(P, axis=1)[:,:-self.resolution]
-        P[:,0] = np.nan
+        P = np.nancumprod(P, axis=1)
+        P[:,:self.resolution] = np.nan
         return P
 
     def get_swap_matrix(self):
@@ -1599,13 +1601,13 @@ class LMMSABR:
                 where=~np.isnan(price[1:, :]) & ~np.isnan(price[:-1, :])
             )
             # swap metrics
-            swap_sim_single = swap_sim_ofs[:,[0]]
-            annuity_single = annuity_ofs[:,[0]]
-            atm_strikes_single = atm_strikes[:,[0]]
-            swap_value = annuity_single * (swap_sim_single - atm_strikes_single)
+            swap_rate = swap_sim_ofs[:,[0]]
+            annuity_swap = annuity_ofs[:,[0]]
+            atm_strikes_single = atm_strikes[0,0]
+            swap_value = annuity_swap * (swap_rate - atm_strikes_single)
             swap_pnl = np.zeros((len(swap_idxs_0),1))
-            swap_pnl[1:] = swap_value[1:]-swap_value[:-1]
-            return np.stack([price, delta, gamma, vega, swaption_pnl, iv], axis=-1), np.stack([swap_value, swap_pnl, annuity_single, swap_sim_single], axis=-1)
+            swap_pnl[1:] = annuity_swap[1:]*(swap_rate[1:]-swap_rate[:-1])
+            return np.stack([price, delta, gamma, vega, swaption_pnl, iv], axis=-1), np.stack([swap_value, swap_pnl, annuity_swap, swap_rate], axis=-1)
         
         hedge_metrics = risk_metrics(swap_hedge_expiry_relative_idx)
         liab_metrics = risk_metrics(swap_liab_expiry_relative_idx)
@@ -1968,6 +1970,42 @@ class LMMSABR:
         return beta_hed[:,None], beta_liab[:,None]
     
 
+    def compute_regression_betas_vol_imm(self):
+        # unpack the [T,2,F] swap‐pair array
+        pairs = self.swap_indices[1]    # shape [T, 2, F]
+        i0, i1 = pairs[:,0], pairs[:,1]  # each shape [T, F]
+        # instantaneous vols & weights
+        inst_vol   = (self.swap_indexer(self.h_mat)
+                    * self.swap_indexer(self.k_mat)
+                    * self.swap_indexer(self.g_mat))
+        inst_vol_w = inst_vol * self.w_t
+
+        # build ρ‐blocks
+        theta_01 = self.theta_mat[i0[...,None], i1[...,None,:]]
+        theta_00 = self.theta_mat[i0[...,None], i0[...,None,:]]
+        theta_11 = self.theta_mat[i1[...,None], i1[...,None,:]]
+
+        # instant cov & vars
+        cov     = np.sum(inst_vol_w[:,0,:,None]
+                    * inst_vol_w[:,1,None,:]
+                    * theta_01,
+                    axis=(1,2))
+
+        var_hed = np.sum(inst_vol_w[:,0,:,None]
+                    * inst_vol_w[:,0,None,:]
+                    * theta_00,
+                    axis=(1,2))
+
+        var_liab= np.sum(inst_vol_w[:,1,:,None]
+                    * inst_vol_w[:,1,None,:]
+                    * theta_11,
+                    axis=(1,2))
+
+        # instantaneous betas
+        beta_hed  = cov / var_hed   # units of swap₁ per unit of swap₀
+        beta_liab = cov / var_liab  # units of swap₀ per unit of swap₁
+        return beta_hed[:,None], beta_liab[:,None]
+
     def generate_episodes(
             
         self,
@@ -2120,7 +2158,7 @@ class LMMSABR:
         # 2) create timestamped subdirectory
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         base_dir = f"{out_dir}/{timestamp}"
-        timestamped_out_dir = f"{base_dir}_{self.tenor}y_{n_episodes}"
+        timestamped_out_dir = f"{base_dir}_{self.swap_hedge_expiry}y{self.tenor}y_hed_vs_{self.swap_liab_expiry}y{self.tenor}y_{n_episodes}"
         Path(timestamped_out_dir).mkdir(parents=True, exist_ok=True)
 
         # 3) pre-allocate memmap files with float32 dtype
@@ -2134,8 +2172,8 @@ class LMMSABR:
         mm_hs  = np.memmap(f"{timestamped_out_dir}/swap_hedge.dat",     mode="w+", dtype=save_dtype, shape=total5)
         mm_ls  = np.memmap(f"{timestamped_out_dir}/swap_liab.dat",      mode="w+", dtype=save_dtype, shape=total5)
         mm_nd  = np.memmap(f"{timestamped_out_dir}/net_direction.dat",  mode="w+", dtype=save_dtype, shape=total_nd)
-        mm_reg_hed  = np.memmap(f"{timestamped_out_dir}/cov_hed.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
-        mm_reg_liab  = np.memmap(f"{timestamped_out_dir}/cov_liab.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
+        mm_reg_hed  = np.memmap(f"{timestamped_out_dir}/reg_hed.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
+        mm_reg_vol_hed  = np.memmap(f"{timestamped_out_dir}/reg_vol_hed.dat",  mode="w+", dtype=save_dtype, shape=total_covs)
 
         # 4) loop over episodes in blocks, with tqdm
         for start in tqdm(range(0, n_episodes, block),
@@ -2161,7 +2199,7 @@ class LMMSABR:
             hs_b = np.empty((b, *shape5), dtype=save_dtype)
             ls_b = np.empty((b, *shape5), dtype=save_dtype)
             reg_hed_b = np.empty((b, T,1), dtype=save_dtype)
-            reg_liab_b = np.empty((b, T,1), dtype=save_dtype)
+            reg_vol_hed_b = np.empty((b, T,1), dtype=save_dtype)
 
             # fill buffers
             for i in range(b):
@@ -2173,13 +2211,15 @@ class LMMSABR:
                 self.get_swap_matrix()
                 (h_sh, h_sw), (l_sh, l_sw) = self.get_sabr_params_imm()
                 
-                reg_hed, reg_liab = self.compute_regression_betas_imm()
+                reg_hed, _ = self.compute_regression_betas_imm()
+                reg_vol_hed, _ = self.compute_regression_betas_vol_imm()
+
                 hd_b[i] = np.nan_to_num(h_sh).astype(save_dtype)
                 ld_b[i] = np.nan_to_num(l_sh).astype(save_dtype)
                 hs_b[i] = np.nan_to_num(h_sw).astype(save_dtype)
                 ls_b[i] = np.nan_to_num(l_sw).astype(save_dtype)
                 reg_hed_b[i] = np.nan_to_num(reg_hed)
-                reg_liab_b[i] = np.nan_to_num(reg_liab)
+                reg_vol_hed_b[i] = np.nan_to_num(reg_vol_hed)
 
 
             # write and flush this block
@@ -2189,7 +2229,7 @@ class LMMSABR:
             mm_ls       [start:start+b] = ls_b
             mm_nd       [start:start+b] = nd_block
             mm_reg_hed  [start:start+b] = reg_hed_b
-            mm_reg_liab [start:start+b] = reg_liab_b
+            mm_reg_vol_hed [start:start+b] = reg_vol_hed_b
 
             mm_h .flush()
             mm_l .flush()
@@ -2197,7 +2237,7 @@ class LMMSABR:
             mm_ls.flush()
             mm_nd.flush()
             mm_reg_hed.flush()
-            mm_reg_liab.flush()
+            mm_reg_vol_hed.flush()
 
         # 5) pickle the LMMModel state for later reuse
         pickle_path = Path(timestamped_out_dir) / "lmm_samples.pkl"
