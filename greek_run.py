@@ -65,7 +65,7 @@ def make_environment(utils,log_bef=None, log_af=None, logger = None) -> dm_env.E
 def main(argv):
     gamma_hedge_ratio = 1.0
     
-    work_folder = f'greek_baseline/{FLAGS.strategy}/{FLAGS.dataset}/{FLAGS.spread}/run_{FLAGS.run_tag}'
+    work_folder = f'greek_baseline/{FLAGS.strategy}/{FLAGS.dataset}/{FLAGS.spread}/{FLAGS.eval_sim}/run_{FLAGS.run_tag}'
     
     # Create an environment, grab the spec, and use it to create networks.
     # eval_utils = Utils(init_ttm=FLAGS.init_ttm, np_seed=4321, num_sim=FLAGS.eval_sim, spread=FLAGS.spread, volvol=FLAGS.vov, sabr=FLAGS.sabr, gbm=FLAGS.gbm, hed_ttm=FLAGS.hed_ttm,

@@ -67,6 +67,8 @@ class StepResult:
     position_swaption_hed: float = 0.0
     position_swapion_liab: float = 0.0
     position_swap_hed: float = 0.0
+    action_mag: float = 0.0
+    action_dir: float = 0.0
 
 class TrainLog:
     @staticmethod
@@ -124,7 +126,7 @@ class TradingEnv(gym.Env):
         self.action_space = spaces.Box(
             low=0.0,    
             high=1.0,
-            shape=(1,),
+            shape=(2,),
             dtype=np.float32
         )
         # obs space bounds
@@ -171,21 +173,25 @@ class TradingEnv(gym.Env):
         profit and loss period reward
         """
         t = self.t
-        action = action[0]
+        action_mag, action_dir = action[0], action[1]
         result = StepResult( episode=self.sim_episode, t=t)
-
-        result.action_gamma = action
-        self.actions[t] = action
+        result.action_mag = action_mag
+        result.action_dir = action_dir
+        self.actions[t] = action[0]
         # gamma to notional 
         gamma_bound =  -self.portfolio.get_gamma_local_hed(t)/(
             self.portfolio.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size)
         vega_bound = -self.portfolio.get_vega_local_hed(t)/(
             self.portfolio.hed_port._base_options[t,t,Greek.VEGA] * self.utils.contract_size)
+        
+        hedge_dir = gamma_bound * action_dir + vega_bound * (1-action_dir)
+
         bounds = [0, gamma_bound, vega_bound]
         high = np.max(bounds)
         low = np.min(bounds)
 
-        result.action_swaption = low + action * (high - low)
+        result.action_swaption = action_mag*hedge_dir#low + action * (high - low)
+
         assert not np.isnan(action).any(), action
         #if self.logger: # dont waste resources
         self.log_bef(self,result,t) 

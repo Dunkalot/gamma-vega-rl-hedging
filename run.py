@@ -236,13 +236,13 @@ def main(argv):
         critic_network=agent_networks['critic'],
         observation_network=agent_networks['observation'],
         n_step=FLAGS.n_step,
-        discount=0.985,
+        discount=1.0,
         sigma=0.3,  # pytype: disable=wrong-arg-types
         checkpoint=False,
         logger=loggers['learner'],
         batch_size=FLAGS.batch_size,
-        policy_optimizer=snt.optimizers.Adam(1e-5),
-        critic_optimizer=snt.optimizers.Adam(2e-4),
+        policy_optimizer=snt.optimizers.Adam(1e-4),
+        critic_optimizer=snt.optimizers.Adam(1e-3),
         annealer_steps = 200000*6
     )
 

@@ -410,20 +410,9 @@ class VegaHedgeAgent(core.Actor):
         super().__init__()
     
     def select_action(self, observation: types.NestedArray) -> types.NestedArray:
-        t = self.env.t
-        
-        gamma_bound =  -self.env.portfolio.get_gamma_local_hed(t)/(
-            self.env.portfolio.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size)
-        
-        vega_bound = -self.env.portfolio.get_vega_local_hed(t)/(
-            self.env.portfolio.hed_port._base_options[t,t,Greek.VEGA] * self.utils.contract_size)
-        
-        bounds = [0, gamma_bound, vega_bound]
-        high = np.max(bounds)
-        low = np.min(bounds)
-        
-        alpha = (self.hedge_ratio * vega_bound - low) / (high - low+1e-11)
-        return np.array([alpha])
+
+
+        return np.array([1,0])
 
     def observe_first(self, timestep: dm_env.TimeStep):
         pass
@@ -447,20 +436,8 @@ class GammaHedgeAgent(core.Actor):
         super().__init__()
     
     def select_action(self, observation: types.NestedArray) -> types.NestedArray:
-        t = self.env.t
 
-        gamma_bound =  -self.env.portfolio.get_gamma_local_hed(t)/(
-            self.env.portfolio.hed_port._base_options[t,t,Greek.GAMMA] * self.utils.contract_size)
-        
-        vega_bound = -self.env.portfolio.get_vega_local_hed(t)/(
-            self.env.portfolio.hed_port._base_options[t,t,Greek.VEGA] * self.utils.contract_size)
-        
-        bounds = [0, gamma_bound, vega_bound]
-        high = np.max(bounds)
-        low = np.min(bounds)
-        
-        alpha = (self.hedge_ratio * gamma_bound - low) / (high - low+1e-11)
-        return np.array([alpha])
+        return np.array([1,1])
 
     def observe_first(self, timestep: dm_env.TimeStep):
         pass
@@ -511,7 +488,7 @@ class DeltaHedgeAgent(core.Actor):
         high = np.max(bounds)
         low = np.min(bounds)
         alpha = (action - low)/ (high - low+1e-11)
-        return np.array([alpha])
+        return np.array([0,0])
 
     def observe_first(self, timestep: dm_env.TimeStep):
         pass
