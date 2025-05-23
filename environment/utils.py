@@ -25,7 +25,7 @@ class Utils:
         sim_time = 1,
         t_max=None,
         beta=0.5,
-        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42, swap_spread =0.0001, test_episode_offset=15_000,test=False, data_path=''):
+        B=0.5, swap_hedge_expiry=1, swap_client_expiry=2, poisson_rate=1,spread=0, seed=42, swap_spread=0, test_episode_offset=15_000,test=False, data_path=''):
         
         self.seed = seed
         assert data_path, 'you must specify the name of the dataset data folder'

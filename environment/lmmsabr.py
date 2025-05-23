@@ -36,12 +36,13 @@ def _simulate_core(f_sim, k_mat, g_mat, h_mat, phi_mat, rho_mat,
     
     drift_arr = np.zeros(len(rev_short))
     dt_sub = dt / sub_steps
+    drift_sum_print = 0
     for t in range((n_steps  - 1)):
         # anchor to real step
-        drift_arr[:] = 0
         k_t_new = k_mat[t].copy()
         f_t_new = f_sim[t].copy()
         for sub_step in range(sub_steps):
+            drift_arr[:] = 0
             t_sub = t*sub_steps+sub_step
             for i, (short_i, canon_i) in enumerate(zip(rev_short, rev_ids)):
                 if ttm_mat[t, canon_i]  < 1e-9:
@@ -60,23 +61,102 @@ def _simulate_core(f_sim, k_mat, g_mat, h_mat, phi_mat, rho_mat,
                 drift_sum = 0
                 for short_j, j in zip(rev_short[:i],rev_ids[:i]):
                     drift_sum += rho_mat[canon_i,j]* drift_arr[short_j]
-                
                 drift_f = -gkfb * drift_sum
                 drift_k = -hk * drift_sum
 
                 df = drift_f * dt_sub + f_beta * g_it * k_it * dZ_f[t_sub, short_i]
                 dk = drift_k * dt_sub + h_it * k_it * dW_s[t_sub, short_i]
-
                 f_t_new[canon_i] = max(f_it + df, 1.e-12)
                 k_t_new[canon_i] = max(k_it + dk, 1.e-12)
                     
                 drift_arr[short_i] = tau * gkfb / (1 + tau * f_it) 
-        f_sim[t+1] = f_t_new
-        k_mat[t+1] = k_t_new
                 
+        f_sim[t+1] = f_t_new
+        k_mat[t+1] = k_t_new   
     return f_sim, k_mat
 
-
+# @njit
+# def _simulate_core(f_sim, k_mat, g_mat, h_mat, phi_mat, rho_mat,
+#                    dZ_f, dW_s, n_steps, dt, tau,
+#                    rev_short, rev_ids, ttm_mat, beta,
+#                    sub_steps=1):
+#     dt_sub = dt / sub_steps
+#     for t in range(n_steps - 1):
+#         # previous values
+#         f_old = f_sim[t].copy()
+#         k_old = k_mat[t].copy()
+#         for sub in range(sub_steps):
+#             t_sub = t * sub_steps + sub
+#             # compute drifts at old state
+#             mu_f_old = np.zeros(len(rev_short), dtype=np.float64)
+#             mu_k_old = np.zeros(len(rev_short), dtype=np.float64)
+#             drift_arr = np.zeros(len(rev_short), dtype=np.float64)
+#             for idx in range(len(rev_short)):
+#                 short_i = rev_short[idx]
+#                 canon_i = rev_ids[idx]
+#                 if ttm_mat[t, canon_i] < 1e-9:
+#                     continue
+#                 g_it = g_mat[t, canon_i]
+#                 h_it = h_mat[t, canon_i]
+#                 f_it = f_old[canon_i]
+#                 k_it = k_old[canon_i]
+#                 f_beta = f_it ** beta
+#                 # sum correlated drifts
+#                 corr = 0.0
+#                 for j in range(idx):
+#                     corr += rho_mat[canon_i, rev_ids[j]] * drift_arr[j]
+#                 mu_f_old[idx] = -g_it * k_it * f_beta * corr
+#                 mu_k_old[idx] = -phi_mat[canon_i, canon_i] * h_it * k_it * corr
+#                 drift_arr[idx] = tau * g_it * k_it * f_beta / (1.0 + tau * f_it)
+#             # predictor step
+#             dZ = dZ_f[t_sub]
+#             dW = dW_s[t_sub]
+#             f_pred = f_old.copy()
+#             k_pred = k_old.copy()
+#             for idx in range(len(rev_short)):
+#                 canon_i = rev_ids[idx]
+#                 f_pred[canon_i] = f_old[canon_i] + mu_f_old[idx] * dt_sub + (f_old[canon_i] ** beta) * g_mat[t, canon_i] * k_old[canon_i] * dZ[short_i]
+#                 if f_pred[canon_i] < 1e-12:
+#                     f_pred[canon_i] = 1e-12
+#                 k_pred[canon_i] = k_old[canon_i] + mu_k_old[idx] * dt_sub + phi_mat[canon_i, canon_i] * h_mat[t, canon_i] * k_old[canon_i] * dW[short_i]
+#                 if k_pred[canon_i] < 1e-12:
+#                     k_pred[canon_i] = 1e-12
+#             # compute drifts at predictor state
+#             mu_f_pred = np.zeros(len(rev_short), dtype=np.float64)
+#             mu_k_pred = np.zeros(len(rev_short), dtype=np.float64)
+#             drift_arr = np.zeros(len(rev_short), dtype=np.float64)
+#             for idx in range(len(rev_short)):
+#                 short_i = rev_short[idx]
+#                 canon_i = rev_ids[idx]
+#                 if ttm_mat[t, canon_i] < 1e-9:
+#                     continue
+#                 g_it = g_mat[t, canon_i]
+#                 h_it = h_mat[t, canon_i]
+#                 f_it = f_pred[canon_i]
+#                 k_it = k_pred[canon_i]
+#                 f_beta = f_it ** beta
+#                 corr = 0.0
+#                 for j in range(idx):
+#                     corr += rho_mat[canon_i, rev_ids[j]] * drift_arr[j]
+#                 mu_f_pred[idx] = -g_it * k_it * f_beta * corr
+#                 mu_k_pred[idx] = -phi_mat[canon_i, canon_i] * h_it * k_it * corr
+#                 drift_arr[idx] = tau * g_it * k_it * f_beta / (1.0 + tau * f_it)
+#             # corrector update
+#             for idx in range(len(rev_short)):
+#                 short_i = rev_short[idx]
+#                 canon_i = rev_ids[idx]
+#                 f_new_val = f_old[canon_i] + 0.5 * (mu_f_old[idx] + mu_f_pred[idx]) * dt_sub + (f_old[canon_i] ** beta) * g_mat[t, canon_i] * k_old[canon_i] * dZ[short_i]
+#                 if f_new_val < 1e-12:
+#                     f_new_val = 1e-12
+#                 f_old[canon_i] = f_new_val
+#                 k_new_val = k_old[canon_i] + 0.5 * (mu_k_old[idx] + mu_k_pred[idx]) * dt_sub + phi_mat[canon_i, canon_i] * h_mat[t, canon_i] * k_old[canon_i] * dW[short_i]
+#                 if k_new_val < 1e-12:
+#                     k_new_val = 1e-12
+#                 k_old[canon_i] = k_new_val
+#         # save next state
+#         f_sim[t+1] = f_old
+#         k_mat[t+1] = k_old
+#     return f_sim, k_mat
 
 
 def make_nss_yield_df(start_date='1986-12-01', end_date='2025-03-01', max_maturity=180):
@@ -1005,8 +1085,8 @@ class LMMSABR:
         self.prime_swap_data(swap_hedge_expiry, swap_client_expiry, tenor)
 
         if t_max is None:
-            print(f"t_max set to {self.max_swap_expiry + self.tenor + self.sim_time}")
-            self.t_max = self.max_swap_expiry + tenor + self.sim_time
+            print(f"t_max set to {self.max_swap_expiry + tenor - self.tau}")
+            self.t_max = self.max_swap_expiry + tenor - self.tau
         else:
             self.t_max = t_max
         self.t_max = self.t_max
@@ -1038,7 +1118,7 @@ class LMMSABR:
         self.swap_hedge_expiry_relative = self.swap_hedge_expiry - self.min_swap_expiry
         self.swap_liab_expiry_relative = self.swap_liab_expiry - self.min_swap_expiry
         self.swap_sim_shape = self.t_to_idx(self.sim_time), self.t_to_idx(self.max_swap_expiry - self.min_swap_expiry+ self.sim_time)
-        self.swap_idxs = np.arange(self.swap_sim_shape[0]),np.arange(self.t_to_idx(self.min_swap_expiry), self.swap_sim_shape[1]+self.t_to_idx(self.min_swap_expiry))
+        self.swap_idxs = np.arange(self.swap_sim_shape[0]),np.array([self.swap_hedge_expiry_idx, self.swap_liab_expiry_idx])
         
     
     def t_to_idx(self, t):
@@ -1175,7 +1255,6 @@ class LMMSABR:
             self.regime_stress = stressed
 
     def build_terminal_vol_terms(self, g_params, h_params):
-        print(h_params)
         g_func = partial(get_instant_vol_func, params=g_params)
         h_func = partial(get_instant_vol_func, params=h_params)
         h_mat = h_func(self.ttm_mat)
@@ -1414,6 +1493,7 @@ class LMMSABR:
             beta=self.beta,
             sub_steps=self.sub_steps
         )
+        self.f_sim[:, 0] = np.nan
     
     def _interpolate_vol(self):
 
@@ -1436,17 +1516,26 @@ class LMMSABR:
         #self.precompute_instant_vol()cc
         self.prepare_curves(shuffle_df=shuffle_df, seed=seed)
         self.simulate_forwards(seed=seed, minimum_starting_rate=minimum_starting_rate)
-
+        self.get_swap_matrix()
         return self.f_sim
     
     def zcb_interp_imm(self):
-        T = self.f_sim.shape[0]
-        zcb = 1/(1 + np.diag((self.df_init['gamma'].values*self.df_init['mod_accrual'].values)[None,:T]*self.f_sim[:, self.df_init['i_s'][:T]]))
-        P = (1/(1+self.f_sim[:,:-self.resolution]*self.tau))
-        P[:,0] = zcb 
+        # 1) Build the matrix of (1 + τ⋅L) factors for your canonical forwards
+        A = 1.0 + self.f_sim[:, self.ids_fwd_canon] * self.tau
+        # A.shape == (n_steps, n_forwards)
 
-        P = np.nancumprod(P, axis=1)
-        P[:,:self.resolution] = np.nan
+        # 2) Compute the “to-terminal” product by reversing, cumprod, then reversing back
+        Pinv = A[:, ::-1].cumprod(axis=1)[:, ::-1]
+        # Pinv[:, j] == ∏_{k=j..end}(1 + τ⋅L[:, k])
+
+        # 3) Build full P matrix (ones everywhere except where you fill in forwards)
+        P = np.ones_like(self.f_sim)
+        #P[:] = np.nan
+
+        # 4) For each forward at ids_fwd_canon[j], the ZCB from that tenor->T_N is Pinv[:, j]
+        #    But the last forward has no “next” cash-flow, so you typically only fill :-1
+        P[:, self.ids_fwd_canon[:-1]] = Pinv[:, 1:]
+        P[:, self.ids_fwd_canon[-1]] = 1.0
         return P
 
     def get_swap_matrix(self):
@@ -1461,6 +1550,7 @@ class LMMSABR:
         if self.imm:
             P         = self.zcb_interp_imm()
         else:
+            assert False, "not implemented yet"
             P         = self.zcb_interp_func(self.f_sim)
         self.P = P
         P_sets        = self.swap_indexer(P)         # P^f(t, T_{leg})
@@ -1594,19 +1684,14 @@ class LMMSABR:
             swaption_pnl = np.zeros_like(price)
             
             # Compute safe differences
-            swaption_pnl[1:] = np.subtract(
-                price[1:, :],       # tomorrow's price
-                price[:-1, :],      # today's price
-                out=swaption_pnl[:-1, :],
-                where=~np.isnan(price[1:, :]) & ~np.isnan(price[:-1, :])
-            )
+            swaption_pnl[:-1] = price[1:, :] - price[:-1, :]
             # swap metrics
             swap_rate = swap_sim_ofs[:,[0]]
             annuity_swap = annuity_ofs[:,[0]]
             atm_strikes_single = atm_strikes[0,0]
             swap_value = annuity_swap * (swap_rate - atm_strikes_single)
             swap_pnl = np.zeros((len(swap_idxs_0),1))
-            swap_pnl[1:] = annuity_swap[1:]*(swap_rate[1:]-swap_rate[:-1])
+            swap_pnl[:-1] = swap_value[1:, [0]] - swap_value[:-1, [0]]
             return np.stack([price, delta, gamma, vega, swaption_pnl, iv], axis=-1), np.stack([swap_value, swap_pnl, annuity_swap, swap_rate], axis=-1)
         
         hedge_metrics = risk_metrics(swap_hedge_expiry_relative_idx)

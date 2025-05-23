@@ -213,7 +213,7 @@ def main(argv):
     
 
 
-    work_folder = f'{FLAGS.obj_func}/{FLAGS.dataset_train}/{FLAGS.spread_train}'
+    work_folder = f'{FLAGS.obj_func}/{FLAGS.dataset_train}/{FLAGS.spread_train}/{FLAGS.train_sim}'
     # Create an environment, grab the spec, and use it to create networks.
     utils = Utils(n_episodes=FLAGS.train_sim, tenor=4, spread=FLAGS.spread_train, data_path=FLAGS.dataset_train)
     loggers = make_loggers(work_folder=work_folder)
@@ -241,8 +241,8 @@ def main(argv):
         checkpoint=False,
         logger=loggers['learner'],
         batch_size=FLAGS.batch_size,
-        policy_optimizer=snt.optimizers.Adam(1e-4),
-        critic_optimizer=snt.optimizers.Adam(5e-5),
+        policy_optimizer=snt.optimizers.Adam(1e-5),
+        critic_optimizer=snt.optimizers.Adam(2e-4),
         annealer_steps = 200000*6
     )
 

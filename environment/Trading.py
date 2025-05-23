@@ -386,6 +386,10 @@ class MainPortfolio(AssetInterface):
         result.cost_swap_hed = self.underlying.add(t, action_swap_hed)
         result.cost_swap_liab = 0.0  # No liability swap
         
+        result.position_swaption_hed = self.hed_port.get_current_position(t)
+        result.position_swaption_liab = self.liab_port.get_current_position(t)
+        result.position_swap_hed = self.underlying.get_position_hed(t)
+
         # PnL contributions
         result.step_pnl_hed_swaption = self.hed_port.step(t)
         result.step_pnl_liab_swaption = self.liab_port.step(t)

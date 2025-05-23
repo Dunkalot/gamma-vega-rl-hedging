@@ -64,6 +64,9 @@ class StepResult:
     iv_norm: float = 0.0
     iv_liab_norm: float = 0.0
     ttm: float = 0.0
+    position_swaption_hed: float = 0.0
+    position_swapion_liab: float = 0.0
+    position_swap_hed: float = 0.0
 
 class TrainLog:
     @staticmethod
